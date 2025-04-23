@@ -2383,6 +2383,10 @@ te_type te_parser::te_eval(const te_expr* texp)
                 {
                 return *var;
                 }
+            else if constexpr (te_is_varlookup_v<T>)
+                {
+                return var.first(var.second);
+                }
             else if constexpr (std::is_same_v<T, te_fun0>)
                 {
                 return var();
@@ -2557,28 +2561,13 @@ bool te_parser::compile(const std::string_view expression)
     }
 
 //--------------------------------------------------
-te_type te_parser::evaluate()
+te_type te_parser::evaluate() const
     {
-    try
-        {
-        if (m_expression.empty())
+        if (m_expression.empty() || m_compiledExpression==nullptr)
             {
-            m_parseSuccess = false;
-            m_errorPos = 0;
-            m_lastErrorMessage = "Expression is emtpy.";
+                throw std::runtime_error("Expression empty.");
             }
-        m_result = (m_compiledExpression != nullptr) ? te_eval(m_compiledExpression) : te_nan;
-        }
-    catch (const std::exception& expt)
-        {
-        m_parseSuccess = false;
-        m_result = te_nan;
-        m_lastErrorMessage = expt.what();
-        }
-
-    reset_usr_resolved_if_necessary();
-
-    return m_result;
+        return te_eval(m_compiledExpression);
     }
 
 //--------------------------------------------------

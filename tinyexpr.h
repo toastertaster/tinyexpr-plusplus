@@ -157,6 +157,7 @@ using te_confun21 = te_type (*)(const te_expr*, te_type, te_type, te_type, te_ty
 using te_confun22 = te_type (*)(const te_expr*, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type);
 using te_confun23 = te_type (*)(const te_expr*, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type);
 using te_confun24 = te_type (*)(const te_expr*, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type);
+using te_varfun  = std::pair<te_type (*)(int), int>;
 // clang-format on
 template<typename FuncType>
 struct te_fun_traits;
@@ -186,6 +187,9 @@ constexpr bool te_is_constant_v = std::is_same_v<T, te_type>;
 
 template<typename T>
 constexpr bool te_is_variable_v = std::is_same_v<T, const te_type*>;
+
+template<typename T>
+constexpr bool te_is_varlookup_v = std::is_same_v<T, te_varfun>;
 
 template<typename FuncType>
 struct te_is_closure
@@ -231,7 +235,8 @@ using te_variant_type =
                  te_confun0, te_confun1, te_confun2, te_confun3, te_confun4, te_confun5, te_confun6,
                  te_confun7, te_confun8, te_confun9, te_confun10, te_confun11, te_confun12,
                  te_confun13, te_confun14, te_confun15, te_confun16, te_confun17, te_confun18,
-                 te_confun19, te_confun20, te_confun21, te_confun22, te_confun23, te_confun24>;
+                 te_confun19, te_confun20, te_confun21, te_confun22, te_confun23, te_confun24,
+                 te_varfun>;
 
 /// @brief A variable's flags, effecting how it is evaluated.
 /// @note This is a bitmask, so flags (TE_PURE and TE_VARIADIC) can be OR'ed.
@@ -461,7 +466,7 @@ class te_parser
         @throws std::runtime_error Throws an exception in the case of arithmetic overflows
             (e.g., `1 << 64` would cause an overflow).*/
     [[nodiscard]]
-    te_type evaluate();
+    te_type evaluate() const;
     /** @brief Compiles and evaluates an expression and returns its result.
         @param expression The formula to compile and evaluate.
         @returns The result, or NaN on error.
@@ -890,7 +895,7 @@ class te_parser
             [](const auto& var_) -> size_t
             {
                 using T = std::decay_t<decltype(var_)>;
-                if constexpr (te_is_constant_v<T> || te_is_variable_v<T>)
+                if constexpr (te_is_constant_v<T> || te_is_variable_v<T> || te_is_varlookup_v<T>)
                     {
                     return 0;
                     }
@@ -922,7 +927,7 @@ class te_parser
     [[nodiscard]]
     constexpr static bool is_variable(const te_variant_type& var) noexcept
         {
-        return var.index() == 1;
+        return var.index() == 1 || std::holds_alternative<te_varfun>(var);
         }
 
     [[nodiscard]]
