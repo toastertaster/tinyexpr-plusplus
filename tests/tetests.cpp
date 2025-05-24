@@ -1101,14 +1101,14 @@ TEST_CASE("Empty", "[empty]")
         {
         CHECK(std::isnan(tep.evaluate()));
         CHECK_FALSE(tep.success());
-        CHECK(std::string{ "Expression is emtpy." } == tep.get_last_error_message());
+        CHECK(std::string{ "Expression is empty." } == tep.get_last_error_message());
         }
 
     SECTION("Empty String")
         {
         CHECK(std::isnan(tep.evaluate("")));
         CHECK_FALSE(tep.success());
-        CHECK(std::string{ "Expression is emtpy." } == tep.get_last_error_message());
+        CHECK(std::string{ "Expression is empty." } == tep.get_last_error_message());
         }
     }
 
@@ -1139,12 +1139,26 @@ TEST_CASE("NaN", "[nan]")
     CHECK(std::isnan(tep.evaluate("npr(-2, 4)")));
     CHECK(std::isnan(tep.evaluate("npr(2, -4)")));
 
-    CHECK(tep.evaluate("NAN()"));
+    CHECK(std::isnan(tep.evaluate("NAN()")));
     CHECK(tep.success());
-    CHECK(tep.evaluate("NAN"));
+    CHECK(std::isnan(tep.evaluate("NAN")));
     CHECK(tep.success());
-    CHECK(tep.evaluate("npr(NAN,90)"));
+    CHECK(std::isnan(tep.evaluate("NA")));
     CHECK(tep.success());
+    CHECK(std::isnan(tep.evaluate("npr(NAN,90)")));
+    CHECK(tep.success());
+
+    CHECK(tep.evaluate("ISNAN(NA)"));
+    CHECK(tep.evaluate("ISNAN(5/0)"));
+    CHECK(tep.evaluate("ISNA(5/0)"));
+    CHECK(tep.evaluate("ISNA(npr(2, -4))"));
+    CHECK_FALSE(tep.evaluate("ISNA(2 + 2)"));
+
+    CHECK(tep.evaluate("ISERROR(NA)"));
+    CHECK(tep.evaluate("ISERR(5/0)"));
+    CHECK(tep.evaluate("ISERROR(5/0)"));
+    CHECK(tep.evaluate("ISERR(npr(2, -4))"));
+    CHECK_FALSE(tep.evaluate("ISERROR(2 + 2)"));
     }
 
 TEST_CASE("Even", "[even]")
@@ -4062,6 +4076,25 @@ COMBIN(15,
             R"(21 / /* division */ 7 // division)"));
         CHECK(3 == tep.evaluate());
         }
+    }
+
+TEST_CASE("NaN Comparison", "[nan]")
+    {
+    te_parser tep;
+
+    CHECK(std::isnan(tep.evaluate("NAN()")));
+    CHECK(std::isnan(tep.evaluate("NAN() == NAN()")));
+    CHECK(std::isnan(tep.evaluate("NAN() != NAN()")));
+    CHECK(std::isnan(tep.evaluate("NAN() <> NAN()")));
+    CHECK(std::isnan(tep.evaluate("NAN() < NAN()")));
+    CHECK(std::isnan(tep.evaluate("NAN() <= NAN()")));
+    CHECK(std::isnan(tep.evaluate("NAN() >= NAN()")));
+    CHECK(std::isnan(tep.evaluate("8 == NAN()")));
+    CHECK(std::isnan(tep.evaluate("8 != NAN()")));
+    CHECK(std::isnan(tep.evaluate("8 <> NAN()")));
+    CHECK(std::isnan(tep.evaluate("8 < NAN()")));
+    CHECK(std::isnan(tep.evaluate("8 <= NAN()")));
+    CHECK(std::isnan(tep.evaluate("8 >= NAN()")));
     }
 
 // Financial functions

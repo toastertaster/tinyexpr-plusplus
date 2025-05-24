@@ -77,6 +77,12 @@ namespace te_builtins
         }
 
     [[nodiscard]]
+    static te_type te_is_nan(te_type val)
+        {
+        return (!std::isfinite(val) ? 1 : 0);
+        }
+
+    [[nodiscard]]
     static te_type te_even(te_type val)
         {
         if (!std::isfinite(val))
@@ -131,37 +137,49 @@ namespace te_builtins
     [[nodiscard]]
     constexpr static te_type te_equal(te_type val1, te_type val2) noexcept
         {
-        return static_cast<te_type>((val1 == val2) ? 1 : 0);
+        return (!std::isfinite(val1) || !std::isfinite(val2)) ?
+                   te_parser::te_nan :
+                   static_cast<te_type>((val1 == val2) ? 1 : 0);
         }
 
     [[nodiscard]]
     constexpr static te_type te_not_equal(te_type val1, te_type val2) noexcept
         {
-        return static_cast<te_type>((val1 != val2) ? 1 : 0);
+        return (!std::isfinite(val1) || !std::isfinite(val2)) ?
+                   te_parser::te_nan :
+                   static_cast<te_type>((val1 != val2) ? 1 : 0);
         }
 
     [[nodiscard]]
     constexpr static te_type te_less_than(te_type val1, te_type val2) noexcept
         {
-        return static_cast<te_type>((val1 < val2) ? 1 : 0);
+        return (!std::isfinite(val1) || !std::isfinite(val2)) ?
+                   te_parser::te_nan :
+                   static_cast<te_type>((val1 < val2) ? 1 : 0);
         }
 
     [[nodiscard]]
     constexpr static te_type te_less_than_equal_to(te_type val1, te_type val2) noexcept
         {
-        return static_cast<te_type>((val1 <= val2) ? 1 : 0);
+        return (!std::isfinite(val1) || !std::isfinite(val2)) ?
+                   te_parser::te_nan :
+                   static_cast<te_type>((val1 <= val2) ? 1 : 0);
         }
 
     [[nodiscard]]
     constexpr static te_type te_greater_than(te_type val1, te_type val2) noexcept
         {
-        return static_cast<te_type>((val1 > val2) ? 1 : 0);
+        return (!std::isfinite(val1) || !std::isfinite(val2)) ?
+                   te_parser::te_nan :
+                   static_cast<te_type>((val1 > val2) ? 1 : 0);
         }
 
     [[nodiscard]]
     constexpr static te_type te_greater_than_equal_to(te_type val1, te_type val2) noexcept
         {
-        return static_cast<te_type>((val1 >= val2) ? 1 : 0);
+        return (!std::isfinite(val1) || !std::isfinite(val2)) ?
+                   te_parser::te_nan :
+                   static_cast<te_type>((val1 >= val2) ? 1 : 0);
         }
 
     [[nodiscard]]
@@ -333,9 +351,9 @@ namespace te_builtins
             {
             return std::numeric_limits<te_type>::infinity();
             }
-        const auto usignVal = static_cast<size_t>(val);
+        const auto unsignedVal = static_cast<size_t>(val);
         uint32_t result{ 1 };
-        for (uint32_t i = 1; i <= usignVal; i++)
+        for (uint32_t i = 1; i <= unsignedVal; i++)
             {
             if (i > (std::numeric_limits<uint32_t>::max)() / result)
                 {
@@ -1453,7 +1471,11 @@ const std::set<te_variable> te_parser::m_functions = { // NOLINT
     { "fact", static_cast<te_fun1>(te_builtins::te_fac), TE_PURE },
     { "false", static_cast<te_fun0>(te_builtins::te_false_value), TE_PURE },
     { "floor", static_cast<te_fun1>(te_builtins::te_floor), TE_PURE },
+    { "iserr", static_cast<te_fun1>(te_builtins::te_is_nan), TE_PURE },
+    { "iserror", static_cast<te_fun1>(te_builtins::te_is_nan), TE_PURE },
     { "iseven", static_cast<te_fun1>(te_builtins::te_is_even), TE_PURE },
+    { "isna", static_cast<te_fun1>(te_builtins::te_is_nan), TE_PURE },
+    { "isnan", static_cast<te_fun1>(te_builtins::te_is_nan), TE_PURE },
     { "isodd", static_cast<te_fun1>(te_builtins::te_is_odd), TE_PURE },
     { "if", static_cast<te_fun3>(te_builtins::te_if), TE_PURE },
     { "ifs", static_cast<te_fun24>(te_builtins::te_ifs),
@@ -1466,6 +1488,7 @@ const std::set<te_variable> te_parser::m_functions = { // NOLINT
     { "min", static_cast<te_fun24>(te_builtins::te_min),
       static_cast<te_variable_flags>(TE_PURE | TE_VARIADIC) },
     { "mod", static_cast<te_fun2>(te_builtins::te_modulus), TE_PURE },
+    { "na", static_cast<te_fun0>(te_builtins::te_nan_value), TE_PURE },
     { "nan", static_cast<te_fun0>(te_builtins::te_nan_value), TE_PURE },
     { "ncr", static_cast<te_fun2>(te_builtins::te_ncr), TE_PURE },
     { "nominal", static_cast<te_fun2>(te_builtins::te_nominal), TE_PURE },
@@ -1754,7 +1777,7 @@ void te_parser::next_token(te_parser::state* theState)
                     std::advance(theState->m_next, 2);
                     }
 #else
-                // if rotation is not availble, error if used in formula
+                // if rotation is not available, error if used in formula
                 else if ((tok == '<' && (*theState->m_next == '<') &&
                           (*std::next(theState->m_next) == '<')) ||
                          (tok == '>' && (*theState->m_next == '>') &&
@@ -2207,12 +2230,12 @@ te_expr* te_parser::expr_level9(te_parser::state* theState)
     return ret;
     }
 
-// Higher levels of operator precendence:
+// Higher levels of operator precedence:
 //--------------------------------------------------
 te_expr* te_parser::term(te_parser::state* theState)
     {
     /* <term>      =    <factor> {("*" | "/" | "%") <factor>} */
-    // third from highest level of operator precendence
+    // third from highest level of operator precedence
     te_expr* ret = factor(theState);
 
     while (theState->m_type == te_parser::state::token_type::TOK_INFIX &&
@@ -2234,7 +2257,7 @@ te_expr* te_parser::term(te_parser::state* theState)
 te_expr* te_parser::factor(te_parser::state* theState)
     {
     /* <factor>    =    <power> {"^" <power>} */
-    // second from highest level of operator precendence
+    // second from highest level of operator precedence
     te_expr* ret = power(theState);
 
     int neg{ 0 };
@@ -2281,7 +2304,7 @@ te_expr* te_parser::factor(te_parser::state* theState)
 te_expr* te_parser::factor(te_parser::state* theState)
     {
     /* <factor>    =    <power> {"^" <power>} */
-    // second from highest level of operator precendence
+    // second from highest level of operator precedence
     te_expr* ret = power(theState);
 
     while (theState->m_type == te_parser::state::token_type::TOK_INFIX &&
@@ -2301,7 +2324,7 @@ te_expr* te_parser::factor(te_parser::state* theState)
 te_expr* te_parser::power(te_parser::state* theState)
     {
     /* <power>     =    {("-" | "+")} <base> */
-    // highest level of operator precendence
+    // highest level of operator precedence
     int theSign{ 1 };
     bool bitwiseNot{ false };
     while (theState->m_type == te_parser::state::token_type::TOK_INFIX &&
@@ -2583,7 +2606,7 @@ te_parser::evaluate(const std::string_view expression) // NOLINT(-readability-id
         {
         m_parseSuccess = false;
         m_errorPos = 0;
-        m_lastErrorMessage = "Expression is emtpy.";
+        m_lastErrorMessage = "Expression is empty.";
         }
 
     return te_nan;
@@ -2610,7 +2633,7 @@ std::string te_parser::list_available_functions_and_variables()
 // cppcheck-suppress unusedFunction
 std::string te_parser::info()
     {
-    std::string sysInfo{ "tinyexpr++ system info:\n=======================\n" };
+    std::string sysInfo{ "TinyExpr++ system info:\n=======================\n" };
 #ifdef TE_FLOAT
     sysInfo += "Data type:                float\n";
 #elif defined(TE_LONG_DOUBLE)
