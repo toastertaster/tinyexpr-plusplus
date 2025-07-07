@@ -1,12 +1,14 @@
 name: Linux Build & Unit Tests
-on: [push]
+on: [push, pull_request]
 
 jobs:
   build:
     name: unit-tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       
       - name: install tools
         run: |
@@ -21,10 +23,10 @@ jobs:
              cmake ./
              make -j4
              cd bin
-             ./TETestRunner --reporter JUnit::out=TE-junit.xml
-             cat TE-junit.xml
-             errors=$(cat TE-junit.xml | grep -Po '(errors)="\K[^"]*')
-             failures=$(cat TE-junit.xml | grep -Po '(failures)="\K[^"]*')
+             ./TETestRunner --reporter JUnit::out=te-junit.xml
+             cat te-junit.xml
+             errors=$(cat te-junit.xml | grep -Po '(errors)="\K[^"]*')
+             failures=$(cat te-junit.xml | grep -Po '(failures)="\K[^"]*')
              echo "Error count is: ${errors}"
              echo "Failure count is: ${failures}"
              if [ "$errors" -gt 0 ]; then
@@ -40,10 +42,10 @@ jobs:
              cmake -DTE_POW_FROM_RIGHT=1 ./
              make -j4
              cd bin
-             ./TETestRunner --reporter JUnit::out=TE-junit2.xml
-             cat TE-junit2.xml
-             errors=$(cat TE-junit2.xml | grep -Po '(errors)="\K[^"]*')
-             failures=$(cat TE-junit2.xml | grep -Po '(failures)="\K[^"]*')
+             ./TETestRunner --reporter JUnit::out=te-junit-pow-from-right.xml
+             cat te-junit-pow-from-right.xml
+             errors=$(cat te-junit-pow-from-right.xml | grep -Po '(errors)="\K[^"]*')
+             failures=$(cat te-junit-pow-from-right.xml | grep -Po '(failures)="\K[^"]*')
              echo "Error count is: ${errors}"
              echo "Failure count is: ${failures}"
              if [ "$errors" -gt 0 ]; then
@@ -59,10 +61,10 @@ jobs:
              cmake -DTE_FLOAT=1 ./
              make -j4
              cd bin
-             ./TETestRunner --reporter JUnit::out=TE-junit2.xml
-             cat TE-junit2.xml
-             errors=$(cat TE-junit2.xml | grep -Po '(errors)="\K[^"]*')
-             failures=$(cat TE-junit2.xml | grep -Po '(failures)="\K[^"]*')
+             ./TETestRunner --reporter JUnit::out=te-junit-float.xml
+             cat te-junit-float.xml
+             errors=$(cat te-junit-float.xml | grep -Po '(errors)="\K[^"]*')
+             failures=$(cat te-junit-float.xml | grep -Po '(failures)="\K[^"]*')
              echo "Error count is: ${errors}"
              echo "Failure count is: ${failures}"
              if [ "$errors" -gt 0 ]; then
@@ -78,10 +80,10 @@ jobs:
              cmake -DTE_LONG_DOUBLE=1 ./
              make -j4
              cd bin
-             ./TETestRunner --reporter JUnit::out=TE-junit2.xml
-             cat TE-junit2.xml
-             errors=$(cat TE-junit2.xml | grep -Po '(errors)="\K[^"]*')
-             failures=$(cat TE-junit2.xml | grep -Po '(failures)="\K[^"]*')
+             ./TETestRunner --reporter JUnit::out=te-junit-long-double.xml
+             cat te-junit-long-double.xml
+             errors=$(cat te-junit-long-double.xml | grep -Po '(errors)="\K[^"]*')
+             failures=$(cat te-junit-long-double.xml | grep -Po '(failures)="\K[^"]*')
              echo "Error count is: ${errors}"
              echo "Failure count is: ${failures}"
              if [ "$errors" -gt 0 ]; then
@@ -97,10 +99,10 @@ jobs:
              cmake -DTE_BITWISE_OPERATORS=1 ./
              make -j4
              cd bin
-             ./TETestRunner --reporter JUnit::out=TE-junit2.xml
-             cat TE-junit2.xml
-             errors=$(cat TE-junit2.xml | grep -Po '(errors)="\K[^"]*')
-             failures=$(cat TE-junit2.xml | grep -Po '(failures)="\K[^"]*')
+             ./TETestRunner --reporter JUnit::out=te-junit-bitwise.xml
+             cat te-junit-bitwise.xml
+             errors=$(cat te-junit-bitwise.xml | grep -Po '(errors)="\K[^"]*')
+             failures=$(cat te-junit-bitwise.xml | grep -Po '(failures)="\K[^"]*')
              echo "Error count is: ${errors}"
              echo "Failure count is: ${failures}"
              if [ "$errors" -gt 0 ]; then
@@ -110,4 +112,8 @@ jobs:
                exit 1
              fi
 
-             
+      - name: Archive test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linux unit tests
+          path: ${{ github.workspace }}/tests/bin/*.xml
