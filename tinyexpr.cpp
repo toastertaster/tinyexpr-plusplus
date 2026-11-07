@@ -3531,11 +3531,11 @@ bool te_parser::compile(const std::string_view expression)
 //--------------------------------------------------
 te_type te_parser::evaluate() const
     {
-        if (m_expression.empty() || m_compiledExpression==nullptr)
-            {
-                throw std::runtime_error("Expression empty.");
-            }
-        return te_eval(m_compiledExpression);
+    if (m_expression.empty() || m_compiledExpression == nullptr)
+        {
+        throw std::runtime_error("Expression empty.");
+        }
+    return te_eval(m_compiledExpression);
     }
 
 //--------------------------------------------------

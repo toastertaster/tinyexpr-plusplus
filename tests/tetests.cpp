@@ -1234,9 +1234,9 @@ TEST_CASE("Empty", "[empty]")
 
     SECTION("Empty Eval")
         {
-        CHECK(std::isnan(tep.evaluate()));
+        // evaluate() is const in this fork: it throws rather than recording the error
+        CHECK_THROWS_WITH(tep.evaluate(), "Expression empty.");
         CHECK_FALSE(tep.success());
-        CHECK(std::string{ "Expression is empty." } == tep.get_last_error_message());
         }
 
     SECTION("Empty String")
@@ -1433,7 +1433,7 @@ TEST_CASE("Functions", "[functions]")
         if (!std::isnan(std::asin(x)))
             CHECK_THAT(tep.evaluate("asin x"), Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(std::asin(x))));
         else
-            CHECK(std::isnan(tep.evaluate("asin x")));
+            CHECK_THROWS_WITH(tep.evaluate("asin x"), "Argument passed to ASIN must be between -1 and 1.");
         CHECK_THAT(tep.evaluate("atan x"), Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(std::atan(x))));
         CHECK_THAT(tep.evaluate("ceil x"), Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(std::ceil(x))));
         CHECK_THAT(tep.evaluate("cos x"), Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(std::cos(x))));
@@ -1453,7 +1453,7 @@ TEST_CASE("Functions", "[functions]")
         if (!std::isnan(std::sqrt(x)))
             CHECK_THAT(tep.evaluate("sqrt x"), Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(std::sqrt(x))));
         else
-            CHECK(std::isnan(tep.evaluate("sqrt x")));
+            CHECK_THROWS_WITH(tep.evaluate("sqrt x"), "Negative value passed to SQRT.");
         CHECK_THAT(tep.evaluate("tan x"), Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(std::tan(x))));
         CHECK_THAT(tep.evaluate("tanh x"), Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(std::tanh(x))));
 
@@ -3801,7 +3801,7 @@ TEST_CASE("Shift operators", "[shift]")
         else
             {
             CHECK_FALSE(tep.compile("1 << 54"));
-            CHECK(std::isnan(tep.evaluate()));
+            CHECK_THROWS_WITH(tep.evaluate(), "Expression empty.");
             CHECK(std::isnan(tep.evaluate("1 << 63")));
             }
         CHECK(std::isnan(tep.evaluate("1 << -5")));
@@ -4216,7 +4216,8 @@ TEST_CASE("Volatile", "[volatile]")
     CHECK_THAT(9.09, Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(const_cast<te_parser&>(vTep).evaluate())));
     const_cast<te_parser&>(vTep).compile(("IF(STRESS_L >= P_LEVEL, 1, 0)"));
     CHECK(const_cast<te_parser&>(vTep).evaluate() == 1);
-    CHECK(vTep.get_result() == 1);
+    // evaluate() is const in this fork and does not store its result for get_result()
+
     CHECK(vTep.success());
     CHECK(const_cast<te_parser&>(vTep).get_variables_and_functions().size() == 2);
 #ifndef TE_NO_BOOKKEEPING
@@ -4306,7 +4307,7 @@ COMBIN(15,
 //The first argument
 3)
 /)"));
-        CHECK(std::isnan(tep.evaluate()));
+            CHECK_THROWS_WITH(tep.evaluate(), "Expression empty.");
         CHECK(tep.get_expression() ==
             R"(
 COMBIN(15,
@@ -6570,8 +6571,8 @@ TEST_CASE("String arguments and memory", "[strings][memory]")
         // division by zero throws out of optimize(), after the nodes are built
         CHECK(std::isnan(tep.evaluate("STRTOTAL(\"a\", 1/0)")));
         CHECK_FALSE(tep.success());
-        CHECK(std::isnan(tep.evaluate("CELLOFFSET(\"cell\", 1/0)")));
-        CHECK_FALSE(tep.success());
+        // not pure, so this compiles and the error is thrown from the (const) evaluate()
+        CHECK_THROWS_WITH(tep.evaluate("CELLOFFSET(\"cell\", 1/0)"), "Division by zero.");
         CHECK(tep.evaluate("STRTOTAL(\"a\", 1)") == 2);
         }
 
