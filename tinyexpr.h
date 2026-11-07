@@ -2,7 +2,7 @@
 /*
  * TINYEXPR - Tiny recursive descent parser and evaluation engine in C
  *
- * Copyright (c) 2015-2020 Lewis Van Winkle
+ * Copyright (c) 2015-2026 Lewis Van Winkle
  *
  * http://CodePlea.com
  *
@@ -26,7 +26,7 @@
 /*
  * TINYEXPR++ - Tiny recursive descent parser and evaluation engine in C++
  *
- * Copyright (c) 2020-2025 Blake Madden
+ * Copyright (c) 2020-2026 Blake Madden
  *
  * C++ version of the TinyExpr library.
  *
@@ -47,13 +47,14 @@
  * 3. This notice may not be removed or altered from any source distribution.
  */
 
-#ifndef __TINYEXPR_PLUS_PLUS_H__
-#define __TINYEXPR_PLUS_PLUS_H__
+#ifndef TINYEXPR_PLUS_PLUS_H
+#define TINYEXPR_PLUS_PLUS_H
 
 #include <algorithm>
 #include <cassert>
 #include <cctype>
 #include <cfloat>
+#include <clocale>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -65,6 +66,7 @@
 #include <limits>
 #include <random>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -79,11 +81,12 @@
 #include <type_traits>
 
 constexpr int TINYEXPR_CPP_MAJOR_VERSION = 1;
-constexpr int TINYEXPR_CPP_MINOR_VERSION = 0;
+constexpr int TINYEXPR_CPP_MINOR_VERSION = 2;
 constexpr int TINYEXPR_CPP_PATCH_VERSION = 0;
-constexpr int TINYEXPR_CPP_TWEAK_VERSION = 1;
-constexpr wchar_t TINYEXPR_CPP_COPYRIGHT[] = L"TinyExpr: Copyright (c) 2015-2020 Lewis Van Winkle\n"
-                                             "TinyExpr++: Copyright (c) 2020-2025 Blake Madden";
+constexpr int TINYEXPR_CPP_TWEAK_VERSION = 0;
+#define TINYEXPR_CPP_COPYRIGHT                                                                     \
+    "TinyExpr: Copyright (c) 2015-2026 Lewis Van Winkle\n"                                         \
+    "TinyExpr++: Copyright (c) 2020-2026 Blake Madden"
 
 class te_parser;
 
@@ -108,6 +111,12 @@ using te_type = double;
 
 #if defined(TE_FLOAT) && defined(TE_BITWISE_OPERATORS)
     #error TE_FLOAT and TE_BITWISE_OPERATORS compile options cannot be combined. TE_FLOAT will not support bitwise operations.
+#endif
+
+/// @brief How deeply an expression may nest parentheses and function calls;
+///     anything deeper is a parse error, rather than a possible stack overflow.
+#ifndef TE_MAX_DEPTH
+    #define TE_MAX_DEPTH 128
 #endif
 
 class te_expr;
@@ -166,6 +175,21 @@ using te_confun23 = te_type (*)(const te_expr*, te_type, te_type, te_type, te_ty
 using te_confun24 = te_type (*)(const te_expr*, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type, te_type);
 using te_varfun  = std::pair<te_type (*)(int), int>;
 // clang-format on
+
+/// @brief A function argument, either a number or a string literal.
+/// @note A `std::string_view` points into the parser's copy of the expression.
+///     Do not store it beyond the compiled expression's lifetime.
+using te_arg = std::variant<te_type, std::string_view>;
+
+/// @brief A function taking any number of number-or-string arguments.
+/// @note The parser does not check the argument count for these.
+///     Review `args.size()` and each argument's type, returning te_parser::te_nan if invalid.
+/// @warning The span is only valid for the duration of the call.
+using te_arg_fun = te_type (*)(std::span<const te_arg>);
+/// @brief Context version of te_arg_fun (te_variable passes a client's te_expr first).
+/// @warning The span is only valid for the duration of the call.
+using te_arg_confun = te_type (*)(const te_expr*, std::span<const te_arg>);
+
 template<typename FuncType>
 struct te_fun_traits;
 
@@ -218,12 +242,30 @@ struct te_is_closure<ReturnType(const te_expr*, Args...)>
     constexpr static bool value{ true };
     };
 
+// te_arg_confun matches the above specializations, but is not a fixed-arity closure.
+template<>
+struct te_is_closure<te_arg_confun>
+    {
+    constexpr static bool value{ false };
+    };
+
 template<typename T>
 constexpr bool te_is_closure_v = te_is_closure<T>::value;
 
+// A string literal from the formula.
+template<typename T>
+constexpr bool te_is_string_v = std::is_same_v<T, std::string_view>;
+
+template<typename T>
+constexpr bool te_is_arg_function_v = std::is_same_v<T, te_arg_fun>;
+
+template<typename T>
+constexpr bool te_is_arg_closure_v = std::is_same_v<T, te_arg_confun>;
+
 template<typename T>
 constexpr bool te_is_function_v =
-    !te_is_constant_v<T> && !te_is_variable_v<T> && !te_is_closure_v<T>;
+    !te_is_constant_v<T> && !te_is_variable_v<T> && !te_is_varlookup_v<T> && !te_is_closure_v<T> &&
+    !te_is_string_v<T> && !te_is_arg_function_v<T> && !te_is_arg_closure_v<T>;
 
 // functions for unknown symbol resolution
 using te_usr_noop = std::function<void()>;
@@ -233,7 +275,7 @@ using te_usr_fun1 = std::function<te_type(std::string_view, std::string&)>;
 using te_usr_variant_type = std::variant<te_usr_noop, te_usr_fun0, te_usr_fun1>;
 
 // do not change the ordering of these, the indices are used to determine
-// the value type of a te_variable
+// the value type of te_variable
 using te_variant_type =
     std::variant<te_type, const te_type*, // indices 0-1
                  te_fun0, te_fun1, te_fun2, te_fun3, te_fun4, te_fun5, te_fun6, te_fun7, te_fun8,
@@ -243,6 +285,9 @@ using te_variant_type =
                  te_confun7, te_confun8, te_confun9, te_confun10, te_confun11, te_confun12,
                  te_confun13, te_confun14, te_confun15, te_confun16, te_confun17, te_confun18,
                  te_confun19, te_confun20, te_confun21, te_confun22, te_confun23, te_confun24,
+                 // string literals and the functions that accept them
+                 te_arg_fun, te_arg_confun, std::string_view,
+                 // variable looked up through a function (wave_tracer)
                  te_varfun>;
 
 /// @brief A variable's flags, effecting how it is evaluated.
@@ -253,10 +298,10 @@ enum te_variable_flags
     {
     /// @brief Don't do anything special when evaluating.
     TE_DEFAULT = 0,
-    /// @brief Don't update when simple evaluation is ran
+    /// @brief Don't update when simple evaluation is run
     ///     (i.e., only updated when expression is compiled).
     TE_PURE = (1 << 0),
-    /// @brief Function that can take 1-7 argument (unused arguments are set to NaN).
+    /// @brief Function that can take 1-24 argument (unused arguments are set to NaN).
     TE_VARIADIC = (1 << 1)
     };
 
@@ -284,15 +329,15 @@ class te_string_less
     // We can assume that we are only dealing with a-z, A-Z, 0-9, ., or _,
     // so use a branchless tolower.
     [[nodiscard]]
-    constexpr static char tolower(const char ch) noexcept
+    constexpr static char tolower(const char chr) noexcept
         {
-        return ch + (32 * (ch >= 'A' && ch <= 'Z'));
+        return chr + (32 * (chr >= 'A' && chr <= 'Z'));
         }
     };
 
 /// @brief A compiled expression.
 /// @details Can also be an additional object that can be passed to
-///     te_confun0-te_confun7 functions via a te_variable.
+///     te_confun0-te_confun24 functions via a te_variable.
 class te_expr
     {
   public:
@@ -304,7 +349,7 @@ class te_expr
     explicit te_expr(const te_variable_flags type) noexcept : m_type(type) {}
 
     /// @private
-    te_expr() noexcept {}
+    te_expr() noexcept = default;
 
     /// @private
     te_expr(const te_expr&) = delete;
@@ -312,7 +357,7 @@ class te_expr
     te_expr& operator=(const te_expr&) = delete;
 
     /// @private
-    virtual ~te_expr() {}
+    virtual ~te_expr() = default;
 
     /// @brief The type that m_value represents.
     te_variable_flags m_type{ TE_DEFAULT };
@@ -342,7 +387,7 @@ class te_variable
     te_variant_type m_value;
     /// @brief The type that m_value represents.
     te_variable_flags m_type{ TE_DEFAULT };
-    /// If @c m_value is a function pointer of type `te_confun0`-`te_confun7`, then
+    /// If @c m_value is a function pointer of type `te_confun0`-`te_confun24`, then
     /// this is passed to that function when called. This is useful for passing
     /// an object which manages additional data to your functions.
     te_expr* m_context{ nullptr };
@@ -437,6 +482,22 @@ class te_parser
         return std::numeric_limits<te_type>::digits >= std::numeric_limits<uint64_t>::digits;
         }
 
+    /// @private
+    /// @returns @c true if @c val is too large to convert to a `uint32_t`.
+    [[nodiscard]]
+    constexpr static bool te_exceeds_uint32(te_type val) noexcept
+        {
+        if constexpr (supports_32bit())
+            {
+            return val > static_cast<te_type>((std::numeric_limits<uint32_t>::max)());
+            }
+        else
+            {
+            // UINT32_MAX rounds up to 2^32 as a float, so the bound must be exclusive
+            return val >= static_cast<te_type>(uint64_t{ 1 } << 32);
+            }
+        }
+
     /// @returns The bits available in the internal data type.\n
     ///     This will affect the largest integer size that can be used in bitwise operations.
     [[nodiscard]]
@@ -450,11 +511,11 @@ class te_parser
     static te_type get_max_integer()
         {
 #ifdef TE_FLOAT
-        const te_type maxBit = std::ldexp(1, FLT_MANT_DIG - 1);
+        const te_type maxBit = std::ldexp(static_cast<te_type>(1), FLT_MANT_DIG - 1);
 #elif defined(TE_LONG_DOUBLE)
-        const te_type maxBit = std::ldexp(1, LDBL_MANT_DIG - 1);
+        const te_type maxBit = std::ldexp(static_cast<te_type>(1), LDBL_MANT_DIG - 1);
 #else
-        const te_type maxBit = std::ldexp(1, DBL_MANT_DIG - 1);
+        const te_type maxBit = std::ldexp(static_cast<te_type>(1), DBL_MANT_DIG - 1);
 #endif
         return maxBit + (maxBit - 1);
         }
@@ -462,12 +523,12 @@ class te_parser
     /** @brief Parses the input @c expression.
         @param expression The formula to compile.
         @returns Whether the expression compiled or not. (This can be checked
-            by calling success() afterwards as well.)
+            by calling success() afterward as well.)
         @sa success().
         @note Returns NaN if division or modulus by zero occurs.
         @throws std::runtime_error Throws an exception in the case of arithmetic overflows
             (e.g., `1 << 64` would cause an overflow).*/
-    bool compile(const std::string_view expression);
+    bool compile(std::string_view expression);
     /** @brief Evaluates expression passed to compile() previously and returns its result.
         @returns The result, or NaN on error.
         @throws std::runtime_error Throws an exception in the case of arithmetic overflows
@@ -481,7 +542,7 @@ class te_parser
         @throws std::runtime_error Throws an exception in the case of arithmetic overflows
             (e.g., `1 << 64` would cause an overflow).*/
     [[nodiscard]]
-    te_type evaluate(const std::string_view expression);
+    te_type evaluate(std::string_view expression);
 
     /// @returns The last call to evaluate()'s result (which will be NaN on error).
     [[nodiscard]]
@@ -552,7 +613,7 @@ class te_parser
     /// @brief Adds a custom variable or function.
     /// @param var The variable/function to add.
     /// @note Prefer using set_variables_and_functions() as it will be more optimal
-    ///     (less sorts will need to be performed).
+    ///     (fewer sorts will need to be performed).
     /// @throws std::runtime_error Throws an exception if an illegal character is found
     ///     in the variable name.
     void add_variable_or_function(te_variable var)
@@ -565,7 +626,7 @@ class te_parser
     /// @param var The variable/function to remove (by name).
     void remove_variable_or_function(te_variable::name_type var)
         {
-        auto foundVar = m_customFuncsAndVars.find(
+        const auto foundVar = m_customFuncsAndVars.find(
             te_variable{ std::move(var), static_cast<te_type>(0.0), TE_DEFAULT, nullptr });
         if (foundVar != m_customFuncsAndVars.cend())
             {
@@ -575,7 +636,7 @@ class te_parser
 
 #ifndef TE_NO_BOOKKEEPING
     /// @brief Removes any custom variables and functions that weren't used in the last compilation.
-    /// @details This can be useful if the parser is pre-loaded with a large number of
+    /// @details This can be useful if the parser is preloaded with a large number of
     ///     variables and functions that needs to be pruned after the first expression is parsed.
     /// @warning After calling this, any custom variables and functions that weren't found
     ///     in the previously parsed expression will no longer be available.
@@ -603,7 +664,7 @@ class te_parser
     void set_unknown_symbol_resolver(te_usr_variant_type usr,
                                      const bool keepResolvedVariables = true)
         {
-        m_unknownSymbolResolve = usr;
+        m_unknownSymbolResolve = std::move(usr);
         m_keepResolvedVariables = keepResolvedVariables;
         }
 
@@ -678,7 +739,7 @@ class te_parser
             get_variables_and_functions().insert(std::move(nh));
             // if previously compiled, then re-compile since this
             // constant would have been optimized
-            if (m_expression.length())
+            if (!m_expression.empty())
                 {
                 compile(m_expression);
                 }
@@ -696,14 +757,12 @@ class te_parser
             {
             return te_nan;
             }
-        if (const auto val = std::get_if<te_type>(&cvar->m_value); val != nullptr)
+        if (const auto* const val = std::get_if<te_type>(&cvar->m_value); val != nullptr)
             {
             return *val;
             }
-        else
-            {
-            return te_nan;
-            }
+
+        return te_nan;
         }
 
     /// @returns The separator used between function arguments.
@@ -748,7 +807,7 @@ class te_parser
     [[nodiscard]]
     bool is_function_used(const std::string_view name) const
         {
-        return m_usedFunctions.find(te_variable::name_type{ name }) != m_usedFunctions.cend();
+        return m_usedFunctions.contains(te_variable::name_type{ name });
         }
 
     /// @returns @c true if @c name is a variable that had been used in the last parsed formula.
@@ -757,7 +816,7 @@ class te_parser
     [[nodiscard]]
     bool is_variable_used(const std::string_view name) const
         {
-        return m_usedVars.find(te_variable::name_type{ name }) != m_usedVars.cend();
+        return m_usedVars.contains(te_variable::name_type{ name });
         }
 #endif
     /// @returns A report of all available functions and variables.
@@ -810,7 +869,7 @@ class te_parser
     /// @brief Resets any resolved variables from USR if not being cached.
     void reset_usr_resolved_if_necessary()
         {
-        if (!m_keepResolvedVariables && m_resolvedVariables.size())
+        if (!m_keepResolvedVariables && !m_resolvedVariables.empty())
             {
             for (const auto& resolvedVar : m_resolvedVariables)
                 {
@@ -840,7 +899,7 @@ class te_parser
     ///     (and has a valid length).
     /// @param var The variable to validate.
     /// @throws std::runtime_error Throws an exception if an illegal character is found.
-    void validate_name(const te_variable& var) const
+    static void validate_name(const te_variable& var)
         {
         if (var.m_name.empty())
             {
@@ -853,7 +912,7 @@ class te_parser
             }
         const auto varCharPos =
             std::find_if(var.m_name.cbegin(), var.m_name.cend(),
-                         [](const auto ch) noexcept { return !is_name_char_valid(ch); });
+                         [](const auto chr) noexcept { return !is_name_char_valid(chr); });
         if (varCharPos != var.m_name.cend())
             {
             throw std::runtime_error(std::string("Invalid character in variable name: ") +
@@ -862,11 +921,37 @@ class te_parser
         }
 
     /// @returns @c true if character is valid for a function or variable name.
-    /// @param ch The character to review.
+    /// @param chr The character to review.
     [[nodiscard]]
-    constexpr static bool is_name_char_valid(const char ch) noexcept
+    constexpr static bool is_name_char_valid(const char chr) noexcept
         {
-        return (is_letter(ch) || (ch >= '0' && ch <= '9') || (ch == '_') || (ch == '.'));
+        return (is_letter(chr) || (chr >= '0' && chr <= '9') || (chr == '_') || (chr == '.'));
+        }
+
+    /// @returns The position of @p chr at or after @p startIndex, skipping quoted string
+    ///     literals, or `std::string::npos` if not found.
+    /// @param str The string to search.
+    /// @param chr The character to search for.
+    /// @param startIndex Where to begin accepting matches.
+    /// @note Quote state is tracked from the start of @p str, so this stays correct
+    ///     after the caller has erased earlier sections.
+    [[nodiscard]]
+    static size_t find_outside_of_string(const std::string& str, const char chr,
+                                         const size_t startIndex)
+        {
+        bool inString{ false };
+        for (size_t i = 0; i < str.length(); ++i)
+            {
+            if (str[i] == '"')
+                {
+                inString = !inString;
+                }
+            else if (!inString && str[i] == chr && i >= startIndex)
+                {
+                return i;
+                }
+            }
+        return std::string::npos;
         }
 
     /// @returns An iterator to the custom variable or function with the given @c name,
@@ -914,13 +999,16 @@ class te_parser
 
     /// @returns Number of parameters that a function/variable takes.
     [[nodiscard]]
-    inline static auto get_arity(const te_variant_type& var) noexcept
+    static auto get_arity(const te_variant_type& var)
         {
         return std::visit(
-            [](const auto& var_) -> size_t
+            [](const auto& var0) -> size_t
             {
-                using T = std::decay_t<decltype(var_)>;
-                if constexpr (te_is_constant_v<T> || te_is_variable_v<T> || te_is_varlookup_v<T>)
+                using T = std::decay_t<decltype(var0)>;
+                // te_arg_fun/te_arg_confun have no fixed arity, so base() sizes them
+                if constexpr (te_is_constant_v<T> || te_is_variable_v<T> || te_is_varlookup_v<T> ||
+                              te_is_string_v<T> || te_is_arg_function_v<T> ||
+                              te_is_arg_closure_v<T>)
                     {
                     return 0;
                     }
@@ -943,7 +1031,7 @@ class te_parser
         }
 
     [[nodiscard]]
-    constexpr static te_type get_constant(const te_variant_type& var)
+    constexpr static te_type get_constant_value(const te_variant_type& var)
         {
         assert(std::holds_alternative<te_type>(var));
         return std::get<0>(var);
@@ -963,15 +1051,40 @@ class te_parser
         }
 
     [[nodiscard]]
-    constexpr static bool is_function(const te_variant_type& var) noexcept
+    constexpr static bool is_function(const te_variant_type& var)
         {
         return std::visit(
-            [](const auto& var_) -> bool
+            [](const auto& var0) -> bool
             {
-                using T = std::decay_t<decltype(var_)>;
+                using T = std::decay_t<decltype(var0)>;
                 return te_is_function_v<T>;
             },
             var);
+        }
+
+    [[nodiscard]]
+    constexpr static bool is_string(const te_variant_type& var) noexcept
+        {
+        return std::holds_alternative<std::string_view>(var);
+        }
+
+    [[nodiscard]]
+    constexpr static std::string_view get_string(const te_variant_type& var)
+        {
+        assert(std::holds_alternative<std::string_view>(var));
+        return std::get<std::string_view>(var);
+        }
+
+    [[nodiscard]]
+    constexpr static bool is_arg_function(const te_variant_type& var) noexcept
+        {
+        return std::holds_alternative<te_arg_fun>(var);
+        }
+
+    [[nodiscard]]
+    constexpr static bool is_arg_closure(const te_variant_type& var) noexcept
+        {
+        return std::holds_alternative<te_arg_confun>(var);
         }
 
 #define TE_DEF_FUNCTION(n)                                                                         \
@@ -992,12 +1105,12 @@ class te_parser
 #undef TE_DEF_FUNCTION
 
     [[nodiscard]]
-    constexpr static bool is_closure(const te_variant_type& var) noexcept
+    constexpr static bool is_closure(const te_variant_type& var)
         {
         return std::visit(
-            [](const auto& var_) -> bool
+            [](const auto& var0) -> bool
             {
-                using T = std::decay_t<decltype(var_)>;
+                using T = std::decay_t<decltype(var0)>;
                 return te_is_closure<T>::value;
             },
             var);
@@ -1020,6 +1133,31 @@ class te_parser
     TE_DEF_CLOSURE(2);
 #undef TE_DEF_CLOSURE
 
+    /// @returns @c true for any function, including the ones taking te_arg.
+    [[nodiscard]]
+    constexpr static bool is_any_function(const te_variant_type& var)
+        {
+        return is_function(var) || is_arg_function(var);
+        }
+
+    /// @returns @c true for any context function, including the ones taking te_arg.
+    [[nodiscard]]
+    constexpr static bool is_any_closure(const te_variant_type& var)
+        {
+        return is_closure(var) || is_arg_closure(var);
+        }
+
+    /// @returns A node's real argument count, excluding a closure's context slot.
+    /// @note Use this instead of get_arity() for te_arg_fun/te_arg_confun nodes,
+    ///     whose arity is only known once base() has parsed them.
+    [[nodiscard]]
+    static size_t get_parameter_count(const te_expr* texp)
+        {
+        assert(texp != nullptr);
+        const auto ctxSlot = is_any_closure(texp->m_value) ? 1U : 0U;
+        return (texp->m_parameters.size() > ctxSlot) ? texp->m_parameters.size() - ctxSlot : 0;
+        }
+
     struct state
         {
         enum class token_type
@@ -1033,7 +1171,9 @@ class te_parser
             TOK_NUMBER,
             TOK_VARIABLE,
             TOK_FUNCTION,
-            TOK_INFIX
+            TOK_INFIX,
+            // only legal inside a te_arg_fun/te_arg_confun argument list
+            TOK_STRING
             };
 
         state(const char* expression, te_variable_flags varType, std::set<te_variable>& vars)
@@ -1047,39 +1187,44 @@ class te_parser
         te_variable_flags m_varType{ TE_DEFAULT };
         te_variant_type m_value;
         te_expr* context{ nullptr };
+        // whether the last power() wrote a unary itself
+        // (separates "-1" from "(-1)")
+        bool m_appliedUnary{ false };
+        // how many base() calls are currently on the stack
+        size_t m_depth{ 0 };
 
         std::set<te_variable>& m_lookup;
         };
 
     [[nodiscard]]
-    inline static te_expr* new_expr(const te_variable_flags type, te_variant_type value,
-                                    const std::initializer_list<te_expr*>& parameters)
+    static te_expr* new_expr(const te_variable_flags type, te_variant_type value,
+                             const std::initializer_list<te_expr*>& parameters)
         {
-        te_expr* ret = new te_expr{ type, std::move(value) };
+        auto* ret = new te_expr{ type, value };
         ret->m_parameters.resize(
             std::max<size_t>(std::max<size_t>(parameters.size(), get_arity(ret->m_value)) +
                                  (is_closure(ret->m_value) ? 1 : 0),
                              0));
-        if (parameters.size())
+        if (parameters.size() != 0U)
             {
-            std::copy(parameters.begin(), parameters.end(), ret->m_parameters.begin());
+            std::ranges::copy(parameters, ret->m_parameters.begin());
             }
         return ret;
         }
 
     [[nodiscard]]
-    inline static te_expr* new_expr(const te_variable_flags type, te_variant_type value)
+    static te_expr* new_expr(const te_variable_flags type, te_variant_type value)
         {
-        te_expr* ret = new te_expr{ type, std::move(value) };
+        auto* ret = new te_expr{ type, value };
         ret->m_parameters.resize(static_cast<size_t>(get_arity(ret->m_value)) +
                                  (is_closure(ret->m_value) ? 1 : 0));
         return ret;
         }
 
     [[nodiscard]]
-    constexpr static bool is_letter(const char ch) noexcept
+    constexpr static bool is_letter(const char chr) noexcept
         {
-        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+        return (chr >= 'a' && chr <= 'z') || (chr >= 'A' && chr <= 'Z');
         }
 
     /** @brief Parses the input expression and binds variables.
@@ -1088,14 +1233,14 @@ class te_parser
             variables to add to the parser.
         @returns null on error.*/
     [[nodiscard]]
-    te_expr* te_compile(const std::string_view expression, std::set<te_variable>& variables);
+    te_expr* te_compile(std::string_view expression, std::set<te_variable>& variables);
     /* Evaluates the expression. */
     [[nodiscard]]
     static te_type te_eval(const te_expr* texp);
 
     /* Frees the expression. */
     /* This is safe to call on null pointers. */
-    inline static void te_free(te_expr* texp)
+    static void te_free(te_expr* texp)
         {
         if (texp == nullptr)
             {
@@ -1116,15 +1261,18 @@ class te_parser
         }
 
     [[nodiscard]]
-    static auto find_lookup(state* s, const std::string_view name)
+    static auto find_lookup(state* ste, const std::string_view name)
         {
-        return s->m_lookup.find(te_variable{ te_variable::name_type{ name },
-                                             static_cast<te_type>(0.0), TE_DEFAULT, nullptr });
+        return ste->m_lookup.find(te_variable{ te_variable::name_type{ name },
+                                               static_cast<te_type>(0.0), TE_DEFAULT, nullptr });
         }
 
     void next_token(state* theState);
+    // depth-limited wrapper around base_impl()
     [[nodiscard]]
     te_expr* base(state* theState);
+    [[nodiscard]]
+    te_expr* base_impl(state* theState);
     [[nodiscard]]
     te_expr* power(state* theState);
     [[nodiscard]]
@@ -1184,4 +1332,4 @@ class te_parser
 #endif
     };
 
-#endif // __TINYEXPR_PLUS_PLUS_H__
+#endif // TINYEXPR_PLUS_PLUS_H

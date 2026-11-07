@@ -22,11 +22,10 @@ for a full list of features.
 
 | Code Analyses  | Result |
 | ------------- | ------------- |
-| cppcheck | [![cppcheck](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/cppcheck.yml/badge.svg)](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/cppcheck.yml) |
 | MS PREfast | [![Microsoft C++ Code Analysis](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/msvc.yml/badge.svg)](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/msvc.yml) |
 | CodeQL | [![CodeQL](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/codeql.yml/badge.svg)](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/codeql.yml) |
 | Quneiform | [![i18n-check](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/i18n-check.yml/badge.svg)](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/i18n-check.yml) |
-
+| clang-tidy | [![clang-tidy](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/clang-tidy.yml/badge.svg)](https://github.com/Blake-Madden/tinyexpr-plusplus/actions/workflows/clang-tidy.yml) |
 
 | Documentation Checks  | Result |
 | ------------- | ------------- |
@@ -40,7 +39,7 @@ Note: for current users of *TinyExpr++*, please see the [compatibility advisory]
 
 ## Features
 
-- **C++17 with no dependencies**.
+- **C++20 with no dependencies**.
 - Single source file and header file.
 - Simple and fast.
 - Implements standard operator precedence.
@@ -50,7 +49,8 @@ Note: for current users of *TinyExpr++*, please see the [compatibility advisory]
 - Can add custom functions and variables easily.
 - Can bind constants at eval-time.
 - Supports variadic functions (taking between 1-24 arguments).
-- Case insensitive.
+- Supports functions that accept quoted string arguments (e.g., `DBQUERY("/Equipment/Temp")`).
+- Case insensitive formulas.
 - Supports non-US formulas (e.g., `POW(2,2; 2)` instead of `POW(2.2, 2)`).
 - Supports C and C++ style comments within math expressions.
 - Released under the zlib license - free for nearly any use.
@@ -63,7 +63,7 @@ Please refer [here](TinyExprChanges.md) for a list of changes from the original 
 
 ## Building
 
-*TinyExpr++* is self-contained in two files: "tinyexpr.cpp and "tinyexpr.h". To use
+*TinyExpr++* is self-contained in two files: "tinyexpr.cpp" and "tinyexpr.h". To use
 *TinyExpr++*, simply add those two files to your project.
 
 The documentation can be built using the following:
@@ -276,6 +276,55 @@ const double r = tep.evaluate("mysum(5, 6)");
 // will be 11
 ```
 
+## Binding to Functions Accepting Strings
+
+Functions can also accept quoted string literals from a formula (e.g., looking a value up by name):
+
+```
+DBQUERY("/Equipment/Temp", 3)
+```
+
+Such a function takes a `std::span` of `te_arg`, where each `te_arg` is either a number or a string:
+
+```cpp
+using te_arg = std::variant<double, std::string_view>;
+
+using te_arg_fun = double (*)(std::span<const te_arg>);
+using te_arg_confun = double (*)(const te_expr*, std::span<const te_arg>);
+```
+
+Any argument can be a string or a number, in any position, and there is no limit on how many are passed.
+Because of this, the parser does not verify the argument count the way it does for `te_fun0`–`te_fun24`.
+Review `args.size()` and each argument's type yourself, returning `te_parser::te_nan` if the call is not valid:
+
+```cpp
+double db_query(std::span<const te_arg> args)
+    {
+    if (args.size() != 2 ||
+        !std::holds_alternative<std::string_view>(args[0]) ||
+        !std::holds_alternative<double>(args[1]))
+        { return te_parser::te_nan; }
+
+    // 'lookup' could be a database query or such
+    return lookup(std::get<std::string_view>(args[0]),
+                  std::get<double>(args[1]));
+    }
+
+te_parser tep;
+tep.set_variables_and_functions(
+{
+    { "dbquery", static_cast<te_arg_fun>(db_query) }
+});
+
+const double r = tep.evaluate(R"(DBQUERY("/Equipment/Temp", 3))");
+```
+
+Note the cast to `te_arg_fun`; this tells the compiler which of the function types to bind to.
+A `te_arg_confun` receives a client object as its first argument, the same way the `te_confun0`–`te_confun24` functions do (see below).
+
+Note that a `std::string_view` argument points into the parser's copy of the expression, so it remains valid for the lifetime of the compiled expression.
+The `std::span`, however, is only valid for the duration of the call.
+
 ## Binding to Custom Classes
 
 A class derived from `te_expr` can be bound to custom functions. This enables you to
@@ -333,7 +382,7 @@ auto result = tep.evaluate("SUM(CELL 0, CELL 1, CELL 2, CELL 3, CELL 4)");
 
 // call the other function, getting the object's max value
 // (will be 8)
-res = tep.evaluate("CellMax()");
+result = tep.evaluate("CellMax()");
 ```
 
 ## Non-US Formatted Formulas
@@ -368,11 +417,10 @@ int main(int argc, char *argv[])
     tep.set_list_separator(';');
 
     /* This will compile the expression and check for errors. */
-    auto r = tep.evaluate(expression);
+    const auto r = tep.evaluate(expression);
 
     if (tep.success())
         {
-        const double r = tep.evaluate(expression);
         std::cout << "Result:\n\t" << r << "\n";
         }
     else
@@ -426,7 +474,10 @@ the compiled expression returned by `te_compile()` would become:
                    | <function-0> {"(" ")"}
                    | <function-1> <power>
                    | <function-X> "(" <expr> {"," <expr>} ")"
+                   | <function-arg> "(" [<argument> {"," <argument>}] ")"
                    | "(" <list> ")"
+    <argument>  =    <expr> | <string>
+    <string>    =    '"' {any character except '"'} '"'
 
 In addition, whitespace between tokens is ignored.
 
@@ -435,6 +486,16 @@ of: letters `a`–`z` or `A`–`Z`, digits `0`–`9`, periods, and
 underscores. Constants can be integers or floating-point numbers, and can be in decimal,
 hexadecimal (e.g., `0x57CEF7`), or scientific notation (e.g., `1e3` for `1000`).
 A leading zero is not required (e.g., `.5` for `0.5`).
+
+String literals are opened and closed by a double quote and have no escape sequences.
+A string literal cannot contain a double quote.
+They are only valid as arguments to a function that accepts them (`<function-arg>` above).
+Using one anywhere else is a syntax error.
+Functions still return numbers; *TinyExpr++* does not evaluate string expressions.
+
+Expression nesting (parentheses and function application) is limited to 128 levels;
+anything deeper is a syntax error, rather than a possible stack overflow.
+Define `TE_MAX_DEPTH` when compiling to change that limit.
 
 ## Supported Functions
 

@@ -1,16 +1,23 @@
 The following are changes from the original TinyExpr C library:
 
-- Compiles as C++17 code.
+- Compiles as C++20 code.
 - `te_*` functions are now wrapped in a `te_parser` class.
 - `te_interp()`, `te_compile()`, and `te_eval()` have been replaced with `te_parser::compile()`, `te_parser::evaluate()`, and `te_parser::set_variables_and_functions()`.
-    `set_variables_and_functions()` sets your list of custom functions and variables. `compile()` compiles and optimizes an expression.
-    Finally, `evaluate()` will use the already compiled expression and return its result.
-    `evaluate()` also has an overload that compiles and evaluates an expression in one call.
-- Variable/function types (e.g., `TE_FUNCTION0`) have been removed; types are now deduced by the compiler. The available flags
-  for variables and functions are now just combinations of `TE_DEFAULT`, `TE_PURE`, and `TE_VARIADIC`.
+  `set_variables_and_functions()` sets your list of custom functions and variables. `compile()` compiles and optimizes an expression.
+  Finally, `evaluate()` will use the already compiled expression and return its result.
+  `evaluate()` also has an overload that compiles and evaluates an expression in one call.
+- Variable/function types (e.g., `TE_FUNCTION0`) have been removed; types are now deduced by the compiler.
+  The available flags for variables and functions are now just combinations of `TE_DEFAULT`, `TE_PURE`, and `TE_VARIADIC`.
 - Formula parsing is now case insensitive.
 - Added support for variadic functions (can accept 1-24 arguments); enabled through the `TE_VARIADIC` flag.
-  (Refer to the `AVERAGE()` function in `tinyexp.cpp` for an example.)
+  (Refer to the `AVERAGE()` function in `tinyexpr.cpp` for an example.)
+- Added support for quoted string arguments (e.g., `DBQUERY("/Equipment/Temp", 3)`), through the new `te_arg_fun` and `te_arg_confun` function types.
+  These accept a `std::span<const te_arg>`, where each `te_arg` is either a number or a `std::string_view`.
+  Any argument can be a string or a number in any position and there is no limit on the argument count.
+  Because there is no fixed arity, the parser does not verify the argument count for these.
+  (The function reviews `args.size()` and each argument's type itself.)
+  String literals are only valid as arguments to such a function, and functions still return numbers — *TinyExpr++* does not evaluate string expressions.
+  (Refer to the `NUMBERVALUE()` function in `tinyexpr.cpp`, or [Example 6](Examples.md), for a demonstration.)
 - Added support for parsing formulas in non-US format (e.g., `pow(2,2; 2)` instead of `pow(2.2, 2)`). Useful for when the program's locale is non-English.
   (Refer to [Example 4](Examples.md) for a demonstration.)
 - `te_expr` is now a derivable base class. This means that you can derive from `te_expr`, add new fields to that derived class (e.g., arrays, strings, even other classes)
@@ -20,7 +27,8 @@ The following are changes from the original TinyExpr C library:
 - Added exception support, where exceptions are thrown for situations like providing invalid separators. Calls to `compile` and `evaluate` should be wrapped in `try`...`catch` blocks.
 - Memory management is handled by the `te_parser` class (you no longer need to call `te_free`). Also, replaced `malloc/free` with `new/delete`.
 - Stricter type safety; uses `std::variant` (instead of unions) that support `double`, `const double*`,
-  and 16 specific function signatures (that will work with lambdas or function pointers).
+  `std::string_view`, and 52 specific function signatures (that will work with lambdas or function pointers):
+  `te_fun0`–`te_fun24`, `te_confun0`–`te_confun24`, `te_arg_fun`, and `te_arg_confun`.
   Also uses `std::initializer` lists (instead of various pointer operations).
 - Separate enums are now used between `te_expr` and `state`'s types and are more strongly typed.
 - Added support for C and C++ style comments (`//` and `/**/`).
@@ -32,25 +40,32 @@ The following are changes from the original TinyExpr C library:
 - Added support for custom handlers to resolve unknown variables.
 - Added new built-in functions:
   - `and`: returns true (i.e., non-zero) if all conditions are true (accepts 1-24 arguments).
+  - `arabic`: converts a Roman numeral string to a number, like the *Excel* function.
   - `average`: returns the mean for a range of values (accepts 1-24 arguments).
+  - `bin2dec`: converts a binary string to a number, like the *Excel* function.
   - `bitand`: bitwise AND.
-  - `bitlrotate`: bitwise left rotate. Versions of this are available for 8-, 16-, 32-, and 64-bit integers (if supported by the platform). (Only available if compiled as C++20.)
+  - `bitlrotate`: bitwise left rotate. Versions of this are available for 8-, 16-, 32-, and 64-bit integers (if supported by the platform).
   - `bitlshift`: left shift.
      Negative shift amount arguments (similar to *Excel*) are supported.
   - `bitnot`: bitwise NOT. Versions of this are available for 8-, 16-, 32-, and 64-bit integers (if supported by the platform).
   - `bitor`: bitwise OR.
-  - `bitrrotate`: bitwise right rotate. Versions of this are available for 8-, 16-, 32-, and 64-bit integers (if supported by the platform). (Only available if compiled as C++20.)
+  - `bitrrotate`: bitwise right rotate. Versions of this are available for 8-, 16-, 32-, and 64-bit integers (if supported by the platform).
   - `bitrshift`: right shift.
      Negative shift amount arguments (similar to *Excel*) are supported.
   - `bitxor`: bitwise XOR.
   - `cot`: returns the cotangent of an angle.
   - `combin`: alias for `ncr()`, like the *Excel* function.
   - `clamp`: constrains a value to a range.
+  - `cumprinc`: returns the cumulative principal paid on a loan between two periods.
+  - `cumipmt`: returns the cumulative interest paid on a loan between two periods.
   - `db`: returns the depreciation of an asset for a specified period using the fixed-declining balance method.
   - `effect`: returns the effective annual interest rate, provided the nominal annual interest rate and the number of compounding periods per year.
   - `even`: returns a value rounded up to the nearest even integer.
   - `fact`: alias for `fac()`, like the *Excel* function.
   - `false`: returns `false` (i.e., `0`) in a boolean expression.
+  - `fv`: returns the future value of an investment.
+  - `hex2dec`: converts a hexadecimal string to a number, like the *Excel* function.
+  - `ipmt`: returns the interest portion of a payment for a specified period of an investment.
   - `iserr`: returns true if an expression evaluates to NaN.
   - `iserror`: alias for `iserr`.
   - `iseven`: returns true if a number is even, false if odd.
@@ -66,11 +81,17 @@ The following are changes from the original TinyExpr C library:
   - `na`: returns `NaN` (i.e., Not-a-Number) in a boolean expression.
   - `nan`: alias for `na`.
   - `nominal`: returns the nominal annual interest rate, provided the effective rate and the number of compounding periods per year.
+  - `nper`: returns the number of periods for an investment.
+  - `numbervalue`: converts text to a number in a locale-independent way, like the *Excel* function.
+  - `oct2dec`: converts an octal string to a number, like the *Excel* function.
   - `odd`: returns a value rounded up to the nearest odd integer.
   - `or`: returns true (i.e., non-zero) if any condition is true (accepts 1-24 arguments).
   - `not`: returns logical negation of value.
   - `permut`: alias for `npr()`, like the *Excel* function.
   - `power`: alias for `pow()`, like the *Excel* function.
+  - `pmt`: returns the periodic payment for an investment or loan based on a constant interest rate, a fixed number of periods, and a present value (like the *Excel* function).
+  - `ppmt`: returns the principal portion of a payment for a specified period of an investment.
+  - `pv`: returns the present value of an investment, like the *Excel* function.
   - `rand`: returns random number between `0` and `1`.
      Note that this implementation uses the Mersenne Twister (`mt19937`) to generate random numbers.
   - `round`: returns a number, rounded to a given decimal point.
@@ -126,8 +147,7 @@ The following are changes from the original TinyExpr C library:
 - All data fields are now initialized.
 - Added [Doxygen](https://github.com/doxygen/doxygen) comments.
 - Removed `te_print()` debug function.
-- Added `list_available_functions_and_variables()` function to display all available built-in and custom
-  functions and variables.
+- Added `list_available_functions_and_variables()` function to display all available built-in and custom functions and variables.
 - Added `get_expression()` function to get the last formula used.
 - Added `[[nodiscard]]` attributes to improve compile-time warnings.
 - Added `constexpr` and `noexcept` for C++ optimization.

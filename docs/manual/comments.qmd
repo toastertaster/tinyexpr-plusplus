@@ -6,8 +6,7 @@ C/C++ style comments are supported, which provide:
 - multi-line comments (text within a pair of `/*` and `*/`).
 - single line comments (everything after a `//` until the end of the current line).
 
-For example, assuming that the variables `P_LEVEL` and `N_OBS` have been
-defined within the parser, an expression such as this could be used:
+For example, assuming that the variables `P_LEVEL` and `N_OBS` have been defined within the parser, an expression such as this could be used:
 
 ```{.cpp}
 /* Returns the p-level of a study if:
@@ -24,3 +23,7 @@ IF(// Review the results from the analysis
 ```
 1. Comment that can span multiple lines.
 2. Single line comment.
+
+:::: {.notesection data-latex=""}
+Comments are stripped before the expression is parsed, but not from inside a quoted string literal\index{comments!string literals}.
+::::

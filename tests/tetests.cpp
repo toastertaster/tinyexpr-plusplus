@@ -1,7 +1,7 @@
 /*
  * TINYEXPR - Tiny recursive descent parser and evaluation engine in C
  *
- * Copyright (c) 2015-2020 Lewis Van Winkle
+ * Copyright (c) 2015-2026 Lewis Van Winkle
  *
  * http://CodePlea.com
  *
@@ -24,7 +24,7 @@
 
 /*
  * TINYEXPR++ - Tiny recursive descent parser and evaluation engine in C++
- * Copyright (c) 2020-2023 Blake Madden
+ * Copyright (c) 2020-2026 Blake Madden
  *
  * C++ version of the TinyExpr library.
  *
@@ -50,7 +50,11 @@
 #include <catch2/benchmark/catch_benchmark_all.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <clocale>
+#include <memory>
 #include <regex>
+#include <string>
+#include <vector>
 
 // clang-format off
 // NOLINTBEGIN
@@ -426,6 +430,137 @@ te_type cell_max(const te_expr* context)
     auto* c = dynamic_cast<const te_expr_array*>(context);
     return static_cast<te_type>(
         *std::max_element(c->m_data.cbegin(), c->m_data.cend()));
+    }
+
+// Records what the last te_arg_fun call actually received.
+std::vector<te_arg> lastArgs;
+
+// Length of the first argument if it's a string, plus any numeric arguments.
+te_type str_len_plus(std::span<const te_arg> args)
+    {
+    lastArgs.assign(args.begin(), args.end());
+    if (args.empty() || !std::holds_alternative<std::string_view>(args[0]))
+        { return te_parser::te_nan; }
+    te_type result = static_cast<te_type>(std::get<std::string_view>(args[0]).length());
+    for (size_t i = 1; i < args.size(); ++i)
+        {
+        if (!std::holds_alternative<te_type>(args[i]))
+            { return te_parser::te_nan; }
+        result += std::get<te_type>(args[i]);
+        }
+    return result;
+    }
+
+// Requires exactly two arguments, so wrong arity is observable.
+te_type str_pair(std::span<const te_arg> args)
+    {
+    if (args.size() != 2 ||
+        !std::holds_alternative<std::string_view>(args[0]) ||
+        !std::holds_alternative<te_type>(args[1]))
+        { return te_parser::te_nan; }
+    return static_cast<te_type>(std::get<std::string_view>(args[0]).length()) *
+           std::get<te_type>(args[1]);
+    }
+
+// Concatenated lengths of every string argument, ignoring position.
+te_type str_total(std::span<const te_arg> args)
+    {
+    te_type total{ 0 };
+    for (const auto& arg : args)
+        {
+        if (const auto* sv = std::get_if<std::string_view>(&arg); sv != nullptr)
+            { total += static_cast<te_type>(sv->length()); }
+        else
+            { total += std::get<te_type>(arg); }
+        }
+    return total;
+    }
+
+// Not TE_PURE, so it must be re-evaluated rather than folded.
+int strCallCount{ 0 };
+te_type str_counted(std::span<const te_arg> args)
+    {
+    ++strCallCount;
+    if (args.size() != 1 || !std::holds_alternative<std::string_view>(args[0]))
+        { return te_parser::te_nan; }
+    return static_cast<te_type>(std::get<std::string_view>(args[0]).length());
+    }
+
+// Read a value out of a (mock) database by its path.
+te_type db_query(std::span<const te_arg> args)
+    {
+    // the "database"
+    static const std::array<std::pair<std::string_view, te_type>, 3> db{ {
+        { "/Equipment/Temp", static_cast<te_type>(21.5) },
+        { "/Equipment/Pressure", static_cast<te_type>(101.3) },
+        { "/Equipment/Humidity", static_cast<te_type>(44) } } };
+
+    if (args.empty() || args.size() > 2 ||
+        !std::holds_alternative<std::string_view>(args[0]))
+        { return te_parser::te_nan; }
+
+    const auto path = std::get<std::string_view>(args[0]);
+    const auto found = std::find_if(db.cbegin(), db.cend(),
+        [path](const auto& entry) { return entry.first == path; });
+    if (found == db.cend())
+        {
+        // optional second argument is the default for a missing key
+        if (args.size() == 2 && std::holds_alternative<te_type>(args[1]))
+            { return std::get<te_type>(args[1]); }
+        return te_parser::te_nan;
+        }
+    return found->second;
+    }
+
+// The same lookup, but against a client object rather than a static table.
+class te_database : public te_expr
+    {
+public:
+    explicit te_database(const te_variable_flags type) noexcept : te_expr(type) {}
+    std::array<std::pair<std::string_view, te_type>, 2> m_rows{ {
+        { "voltage", static_cast<te_type>(240) },
+        { "current", static_cast<te_type>(13) } } };
+    mutable int m_readCount{ 0 };
+    };
+
+te_type query_db(const te_expr* context, std::span<const te_arg> args)
+    {
+    auto* db = dynamic_cast<const te_database*>(context);
+    if (db == nullptr || args.size() != 1 ||
+        !std::holds_alternative<std::string_view>(args[0]))
+        { return te_parser::te_nan; }
+    ++db->m_readCount;
+    const auto key = std::get<std::string_view>(args[0]);
+    const auto found = std::find_if(db->m_rows.cbegin(), db->m_rows.cend(),
+        [key](const auto& row) { return row.first == key; });
+    return (found == db->m_rows.cend()) ? te_parser::te_nan : found->second;
+    }
+
+// te_arg_confun: indexes the context object's array by a named "cell."
+te_type cell_named(const te_expr* context, std::span<const te_arg> args)
+    {
+    auto* c = dynamic_cast<const te_expr_array*>(context);
+    if (c == nullptr || args.size() != 1 ||
+        !std::holds_alternative<std::string_view>(args[0]))
+        { return te_parser::te_nan; }
+    const auto name = std::get<std::string_view>(args[0]);
+    if (name == "first") { return static_cast<te_type>(c->m_data.front()); }
+    if (name == "last") { return static_cast<te_type>(c->m_data.back()); }
+    return te_parser::te_nan;
+    }
+
+// te_arg_confun taking a mix of strings and numbers.
+te_type cell_offset(const te_expr* context, std::span<const te_arg> args)
+    {
+    auto* c = dynamic_cast<const te_expr_array*>(context);
+    if (c == nullptr || args.size() != 2 ||
+        !std::holds_alternative<std::string_view>(args[0]) ||
+        !std::holds_alternative<te_type>(args[1]))
+        { return te_parser::te_nan; }
+    const auto name = std::get<std::string_view>(args[0]);
+    const auto offset = static_cast<size_t>(std::get<te_type>(args[1]));
+    if (name != "cell" || offset >= c->m_data.size()) { return te_parser::te_nan; }
+    return static_cast<te_type>(c->m_data[offset]);
     }
 
 te_type bench_a5(te_type a) {
@@ -1220,7 +1355,8 @@ TEST_CASE("Hex", "[hex]")
 
     CHECK(tep.evaluate("0x0") == 0);
     CHECK(tep.evaluate("0x8") == 8);
-    CHECK(tep.evaluate("0x1FFFFFFFFFFFFF") == 9007199254740991);
+    // (2^53)-1 isn't representable as a float; both sides round to 2^53 there
+    CHECK(tep.evaluate("0x1FFFFFFFFFFFFF") == static_cast<te_type>(9007199254740991));
     CHECK(tep.evaluate("0x57CEF7") == 5754615);
     CHECK(tep.evaluate("0x57CEF7") == 5754615);
     CHECK(tep.evaluate("-0X57CEF7") == -5754615);
@@ -1381,11 +1517,20 @@ TEST_CASE("Power", "[power]")
     CHECK(tep.evaluate("-(2)^2") == tep.evaluate("-(2^2)"));
     CHECK(tep.success());
 
-    /* TODO POW FROM RIGHT IS STILL BUGGY
-    {"(-2)^2", "4"},
-    {"(-1)^0", "1"},
-    {"(-5)^0", "1"},
-    {"-2^-3^-4", "-(2^(-(3^-4)))"}*/
+    CHECK(tep.evaluate("(-2)^2") == tep.evaluate("4"));
+    CHECK(tep.success());
+
+    CHECK(tep.evaluate("(-1)^0") == tep.evaluate("1"));
+    CHECK(tep.success());
+
+    CHECK(tep.evaluate("(-5)^0") == tep.evaluate("1"));
+    CHECK(tep.success());
+
+    CHECK(tep.evaluate("2^-3^4") == tep.evaluate("2^(-(3^4))"));
+    CHECK(tep.success());
+
+    CHECK(tep.evaluate("-2^-3^-4") == tep.evaluate("-(2^(-(3^-4)))"));
+    CHECK(tep.success());
 #elif defined(TE_BITWISE_OPERATORS)
     CHECK(tep.evaluate("2**3**4") == tep.evaluate("(2**3)**4"));
     CHECK(tep.success());
@@ -1424,6 +1569,9 @@ TEST_CASE("Power", "[power]")
     CHECK(tep.success());
 
     CHECK(tep.evaluate("(-5)**0") == tep.evaluate("1"));
+    CHECK(tep.success());
+
+    CHECK(tep.evaluate("2**-3**4") == tep.evaluate("(2**(-3))**4"));
     CHECK(tep.success());
 
     CHECK(tep.evaluate("-2**-3**-4") == tep.evaluate("((-2)**(-3))**(-4)"));
@@ -1466,6 +1614,9 @@ TEST_CASE("Power", "[power]")
     CHECK(tep.success());
 
     CHECK(tep.evaluate("(-5)^0") == tep.evaluate("1"));
+    CHECK(tep.success());
+
+    CHECK(tep.evaluate("2^-3^4") == tep.evaluate("(2^(-3))^4"));
     CHECK(tep.success());
 
     CHECK(tep.evaluate("-2^-3^-4") == tep.evaluate("((-2)^(-3))^(-4)"));
@@ -3402,18 +3553,18 @@ TEST_CASE("Bitwise operators", "[bitwise]")
             te_parser::supports_32bit())
             {
             val = std::numeric_limits<uint32_t>::max();
-            decltype(val) res = ~val;
-            CHECK(tep.evaluate("~" + std::to_string(val)) == res);
+            decltype(val) res2 = ~val;
+            CHECK(tep.evaluate("~" + std::to_string(val)) == res2);
 
             val /= 2;
-            res = ~val;
-            CHECK(tep.evaluate("~" + std::to_string(val)) == res);
+            res2 = ~val;
+            CHECK(tep.evaluate("~" + std::to_string(val)) == res2);
 
             val = 1986;
-            res = ~val;
-            CHECK(tep.evaluate("~" + std::to_string(val)) == res);
-            CHECK(tep.evaluate("+~1986") == res);
-            CHECK(tep.evaluate("~+1986") == res);
+            res2 = ~val;
+            CHECK(tep.evaluate("~" + std::to_string(val)) == res2);
+            CHECK(tep.evaluate("+~1986") == res2);
+            CHECK(tep.evaluate("~+1986") == res2);
             }
         }
 
@@ -3754,7 +3905,7 @@ TEST_CASE("Unknown symbol resolve funct pointer purge resolved 2", "[usr]")
     {
     std::string str("id.temperature < 51");
     te_parser parser;
-    parser.set_unknown_symbol_resolver([](std::string_view symbol)
+    parser.set_unknown_symbol_resolver([]([[maybe_unused]] std::string_view symbol)
         {
         static te_type temperature = 49.0;
         return temperature += 1.0;
@@ -3770,7 +3921,7 @@ TEST_CASE("Unknown symbol resolve lambda with capture", "[usr]")
     std::string str("id.temperature < 51");
     te_type temperature = 49.0;
     te_parser parser;
-    parser.set_unknown_symbol_resolver([&](std::string_view symbol)
+    parser.set_unknown_symbol_resolver([&]([[maybe_unused]] std::string_view symbol)
         {
         return temperature += 1.0;
         }, false);
@@ -4193,6 +4344,870 @@ TEST_CASE("NaN Comparison", "[nan]")
     }
 
 // Financial functions
+// --------------------------------------------------
+
+// IPMT
+// --------------------------------------------------
+TEST_CASE("PPMT", "[finance]")
+    {
+    te_parser tep;
+
+    // Excel: Loan of $10,000, 5% annual interest, 60 monthly payments
+    // Formula: =IPMT(0.05/12, 1, 60, 10000)
+    // Result: -41.67
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 1, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-41.6666666667),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: Same loan, second payment interest
+    // Formula: =IPMT(0.05/12, 2, 60, 10000)
+    // Result: -41.05
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 2, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-41.053976375944),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: Beginning-of-period payments (type = 1)
+    // First payment has no interest
+    // Formula: =IPMT(0.05/12, 1, 60, 10000, 0, 1)
+    // Result: 0.00
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 1, 60, 10000, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(0.0),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: Beginning-of-period payments, second payment
+    // Formula: =IPMT(0.05/12, 2, 60, 10000, 0, 1)
+    // Result: -40.88
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 2, 60, 10000, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-40.8836279263),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // LibreOffice / Excel: Extreme negative rate uses linear interest regime
+    // Formula: =IPMT(-1.1, 1, 60, 10000)
+    // Result: 11000
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(-1.1, 1, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(11000.0),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: Zero interest rate
+    // Formula: =IPMT(0, 10, 60, 10000)
+    // Result: 0.00
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0, 10, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(0.0),
+            WITHIN_TYPE_CAST(0.00001)));
+
+    // Excel Help: Loan of $2,000, 10% annual interest, 2-year term, monthly payments
+    // Principal payment for month 1
+    // Formula: =PPMT(10%/12, 1, 2*12, 2000)
+    // Result: -75.62
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(0.10/12, 1, 2*12, 2000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-75.62),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel Help: Loan of $200,000, 8% annual interest, 10-year term, annual payments
+    // Principal payment for year 10 (final year)
+    // Formula: =PPMT(0.08, 10, 10, 200000)
+    // Result: -27598.05
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(0.08, 10, 10, 200000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-27598.05),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: Period out of range returns #NUM!
+    // Formula: =IPMT(0.05/12, 0, 60, 10000)
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 0, 60, 10000)"))));
+
+    // Excel: Period greater than total periods returns #NUM!
+    // Formula: =IPMT(0.05/12, 61, 60, 10000)
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 61, 60, 10000)"))));
+
+    // Excel: Period less than 1 returns #NUM!
+    // Formula: =PPMT(0.05/12, 0, 60, 10000)
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(0.05/12, 0, 60, 10000)"))));
+
+    // Excel: Period greater than total periods returns #NUM!
+    // Formula: =PPMT(0.05/12, 61, 60, 10000)
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(0.05/12, 61, 60, 10000)"))));
+    
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(-1.1, 1, 60, 10000)"))));
+
+    // Excel: Zero interest rate — entire payment is principal
+    // Formula: =PPMT(0, 5, 10, 1000)
+    // Result: -100.00
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(0, 5, 10, 1000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-100.0),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: Beginning-of-period payments
+    // Loan: $10,000, 5% annual, 60 months
+    // Formula: =PPMT(0.05/12, 1, 60, 10000, 0, 1)
+    // Result: -188.93
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(0.05/12, 1, 60, 10000, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-187.929297699694),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: Sign symmetry — flipping PV flips PPMT
+    // Formula: =PPMT(0.05/12, 10, 60, -10000)
+    // Result: 155.65
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(0.05/12, 10, 60, -10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(152.652685047979),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: Final period principal payment
+    // Formula: =PPMT(0.05/12, 60, 60, 10000)
+    // Result: -187.93
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PPMT(0.05/12, 60, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-187.929297699694),
+            WITHIN_TYPE_CAST(0.0001)));
+    }
+
+    // CUMPRINC
+// --------------------------------------------------
+TEST_CASE("CUMPRINC", "[finance]")
+    {
+    te_parser tep;
+
+    // Excel Help example:
+    // 9% annual interest rate, 30-year loan, $125,000 present value
+    // Principal paid in year 2 (months 13–24), payments at END of period
+    // Formula: =CUMPRINC(0.09/12, 30*12, 125000, 13, 24, 0)
+    // Result: -934.11
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.09/12, 30*12, 125000, 13, 24, 0)")
+        ),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-934.107123420898),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel Help example:
+    // Same loan, payments at BEGINNING of period
+    // Formula: =CUMPRINC(0.09/12, 30*12, 125000, 13, 24, 1)
+    // Result: -$927.15
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.09/12, 30*12, 125000, 13, 24, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-927.153472378064),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: single-period principal equals PPMT
+    // Formula: =CUMPRINC(0.05/12, 60, 10000, 1, 1, 0)
+    // Result: -147.05
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 1, 1, 0)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-147.045669773443),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // LibreOffice / Excel: CUMPRINC does NOT support zero interest
+    // Formula: =CUMPRINC(0, 10, 1000, 1, 10, 0)
+    // Result: ERR / #NUM!
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0, 10, 1000, 1, 10, 0)"))));
+
+    // LibreOffice / Excel: CUMPRINC does NOT support linear-interest regime
+    // Formula: =CUMPRINC(-1.1, 60, 10000, 1, 1, 0)
+    // Result: ERR / #NUM!
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(-1.1, 60, 10000, 1, 1, 0)"))));
+
+    // Excel: start period < 1 → #NUM!
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 0, 10, 0)"))));
+
+    // Excel: end period > total periods → #NUM!
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 1, 61, 0)"))));
+
+    // Excel: start period > end period → #NUM!
+    CHECK(std::isnan(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 10, 5, 0)"))));
+
+    // Excel:
+    // 9% annual interest, 30-year loan, $125,000
+    // Principal paid in year 2 (months 13–24), payments at END of period
+    // Formula: =CUMPRINC(0.09/12, 30*12, 125000, 13, 24, 0)
+    // Result: -$934.11
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.09/12, 30*12, 125000, 13, 24, 0)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-934.107123420898),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // LibreOffice / Excel:
+    // Same loan, payments at BEGINNING of period
+    // Formula: =CUMPRINC(0.09/12, 30*12, 125000, 13, 24, 1)
+    // Result: -$927.15
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.09/12, 30*12, 125000, 13, 24, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-927.153472378064),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // LibreOffice / Excel:
+    // Single period cumulative principal equals PPMT
+    // Formula: =CUMPRINC(0.05/12, 60, 10000, 1, 1, 0)
+    // Result: -147.05
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 1, 1, 0)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-147.045669773443),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // LibreOffice / Excel:
+    // Early loan principal (month 1)
+    // Formula: =CUMPRINC(0.05/12, 60, 10000, 1, 1, 0)
+    // Result: -147.05
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 1, 1, 0)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-147.045669773443),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // LibreOffice / Excel:
+    // Late loan principal (month 60)
+    // Formula: =CUMPRINC(0.05/12, 60, 10000, 60, 60, 0)
+    // Result: -$187.93
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 60, 60, 0)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-187.929297699694),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // LibreOffice / Excel:
+    // Principal paid in first year (months 1–12)
+    // Formula: =CUMPRINC(0.05/12, 60, 10000, 1, 12, 0)
+    // Result: -$1,805.55
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 1, 12, 0)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-1805.55252981598),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // LibreOffice / Excel:
+    // Beginning-of-period payments: first payment is mostly principal
+    // Formula: =CUMPRINC(0.05/12, 60, 10000, 1, 1, 1)
+    // Result: -187.93
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(
+            tep.evaluate("CUMPRINC(0.05/12, 60, 10000, 1, 1, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-187.929297699694),
+            WITHIN_TYPE_CAST(0.0001)));
+    }
+
+// CUMIPMT
+// --------------------------------------------------
+TEST_CASE("CUMIPMT", "[finance]")
+    {
+    te_parser tep;
+
+    // Excel / docs example:
+    // 9% annual interest rate, 30-year loan, $125,000 PV
+    // Total interest paid in the 2nd year (periods 13 through 24), payments at END (type=0)
+    // =CUMIPMT(0.09/12, 30*12, 125000, 13, 24, 0) -> -11135.23
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("CUMIPMT(0.09/12, 30*12, 125000, 13, 24, 0)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(-11135.23), WITHIN_TYPE_CAST(0.00001)));
+
+    // Microsoft example (beginning-of-period payments):
+    // =CUMIPMT(0.09/12, 30*12, 125000, 13, 24, 1) -> -11052.34
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("CUMIPMT(0.09/12, 30*12, 125000, 13, 24, 1)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(-11052.34), WITHIN_TYPE_CAST(0.00001)));
+
+    // Single-period sanity check:
+    // =CUMIPMT(0.09/12, 30*12, 125000, 1, 1, 0) -> -937.50
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("CUMIPMT(0.09/12, 30*12, 125000, 1, 1, 0)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(-937.50), WITHIN_TYPE_CAST(0.00001)));
+    }
+
+// IPMT
+// --------------------------------------------------
+TEST_CASE("IPMT", "[finance]")
+    {
+    te_parser tep;
+
+    // --------------------------------------------------
+    // Excel Online Help example
+    //
+    // Data:
+    // Annual interest rate: 10%
+    // Number of years: 3
+    // Present value: 8000
+    //
+    // Excel formula:
+    // =IPMT(0.10/12, 1, 3*12, 8000)
+    //
+    // Excel result: -66.67
+    // --------------------------------------------------
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.10/12, 1, 3*12, 8000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-66.67),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // --------------------------------------------------
+    // Excel: =IPMT(0.10/12, 2, 3*12, 8000)
+    // Interest portion for second period
+    // Excel result: -65.0710764092997
+    // --------------------------------------------------
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.10/12, 2, 3*12, 8000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-65.0710764092997),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // --------------------------------------------------
+    // Excel: =IPMT(0.05/12, 1, 60, 10000)
+    // First month's interest on a 5-year loan
+    // Excel result: -41.67
+    // --------------------------------------------------
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 1, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-41.67),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // --------------------------------------------------
+    // Excel: =IPMT(0.05/12, 12, 60, 10000)
+    // Interest portion after one year
+    // Excel result: -34.12
+    // --------------------------------------------------
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 12, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-34.7848954631707),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // --------------------------------------------------
+    // Payments at beginning of period
+    //
+    // Excel: =IPMT(0.05/12, 1, 60, 10000, 0, 1)
+    // First period interest is zero
+    // --------------------------------------------------
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 1, 60, 10000, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(0.0)));
+
+    // --------------------------------------------------
+    // Excel: =IPMT(0.05/12, 2, 60, 10000, 0, 1)
+    // Interest starts accruing in second period
+    // Excel result: -40.88
+    // --------------------------------------------------
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 2, 60, 10000, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-40.8836279262513),
+            WITHIN_TYPE_CAST(0.00001)));
+
+    // --------------------------------------------------
+    // Zero interest rate
+    //
+    // Excel: =IPMT(0, 10, 60, 10000)
+    // Excel result: 0
+    // --------------------------------------------------
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("IPMT(0, 10, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(0.0)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("=IPMT(0.05/12, 1.5, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-41.3606399677465),
+            WITHIN_TYPE_CAST(0.0000001)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("=IPMT(-1, 1, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(10000),
+            WITHIN_TYPE_CAST(0.0000001)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("=IPMT(-1.1, 1, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(11000),
+            WITHIN_TYPE_CAST(0.0000001)));
+
+    // --------------------------------------------------
+    // Invalid inputs
+    // --------------------------------------------------
+
+    // period < 1
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 0, 60, 10000)"))));
+
+    // period > periods
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 61, 60, 10000)"))));
+
+    // non-finite args
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("IPMT(NaN, 1, 60, 10000)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, NaN, 60, 10000)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 1, NaN, 10000)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("IPMT(0.05/12, 1, 60, NaN)"))));
+    }
+
+// --------------------------------------------------
+// PV
+// --------------------------------------------------
+TEST_CASE("PV", "[finance]")
+    {
+    te_parser tep;
+
+    // Excel: =PV(0.05/12, 60, -200)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05/12, 60, -200)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(10598.14), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(0.05/12, 60, -200, 0, 1)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05/12, 60, -200, 0, 1)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(10642.30), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(0.1, 1, -100)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.1, 1, -100)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(90.91), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(0, 60, -200)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0, 60, -200)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(12000)));
+
+    // Excel: =PV(0, 10, 0, 1000)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0, 10, 0, 1000)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(-1000)));
+
+    // Excel: =PV(0.05, 10, -100)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05, 10, -100)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(772.17), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(0.05, 10, -100, 0)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05, 10, -100, 0)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(772.17), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(0.05, 10, -100, 0, 0)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05, 10, -100, 0, 0)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(772.17), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(0.05, 10, -100, 0, 2)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05, 10, -100, 0, 2)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(810.78), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(0.05, 10, -100, 0, -1)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05, 10, -100, 0, -1)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(810.78), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(-0.5, 5, -100)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(-0.5, 5, -100)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(6200), WITHIN_TYPE_CAST(0.0001)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST((tep.evaluate("PV(0.05, 0, -100)"))),
+        Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0), WITHIN_TYPE_CAST(0.0001)));
+
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05, -10, -100)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(-1257.78925355488), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(-1, 10, -100) -> #NUM!
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PV(-1, 10, -100)"))));
+
+    // Excel: =PV(NaN, 10, -100) -> #NUM!
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PV(NaN, 10, -100)"))));
+
+    // Excel: =PV(0.05, NaN, -100) -> #NUM!
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05, NaN, -100)"))));
+
+    // Excel: =PV(0.05, 10, NaN) -> #NUM!
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PV(0.05, 10, NaN)"))));
+
+    // Excel: =PV(0.08/12, 360, -1000)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.08/12, 360, -1000)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(136283.35), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =PV(0.03, 1, 0, 1000)
+    CHECK_THAT(WITHIN_TYPE_CAST(tep.evaluate("PV(0.03, 1, 0, 1000)")),
+               Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(-970.87), WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel example:
+    // Money paid out of an insurance annuity at the end of every month: $500
+    // Interest rate: 8% annually
+    // Term: 20 years
+    //
+    // Excel formula:
+    // =PV(A3/12, 12*A4, A2, , 0)
+    // =PV(0.08/12, 240, 500, 0, 0)
+    //
+    // Excel result = -59,775.15
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PV(0.08/12, 12*20, 500, 0, 0)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-59775.15),
+            WITHIN_TYPE_CAST(0.0001)));
+    }
+
+TEST_CASE("PMT", "[finance]")
+    {
+    te_parser tep;
+
+    // Excel: =PMT(0.05/12, 60, 10000)
+    // Monthly payment on a $10,000 loan at 5% for 5 years
+    // Excel result ~ -188.71
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0.05/12, 60, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-188.71),
+            WITHIN_TYPE_CAST(0.00002)));
+
+    // Excel: =PMT(0.05/12, 60, 10000, 0, 1)
+    // Payments at beginning of period -> slightly smaller payment
+    // Excel result ~ -187.93
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0.05/12, 60, 10000, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-187.93),
+            WITHIN_TYPE_CAST(0.001)));
+
+    // Excel: =PMT(0, 60, 12000)
+    // Zero interest: straight-line repayment
+    // Excel result = -200
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0, 60, 12000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-200)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(-1, 60, 12000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(0)));
+
+    // Excel: =PMT(0.1, 1, 100)
+    // One-period loan at 10%
+    // Excel result = -110
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0.1, 1, 100)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-110),
+            WITHIN_TYPE_CAST(0.00001)));
+
+    // Excel: =PMT(0.05/12, 60, 10000, 1000)
+    // Loan with balloon payment
+    // Excel result ~ -203.42
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0.05/12, 60, 10000, 1000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-203.42),
+            WITHIN_TYPE_CAST(0.001)));
+
+    // Excel data:
+    // Annual interest rate: 8%
+    // Number of months: 10
+    // Loan amount: $10,000
+
+    // Excel: =PMT(A2/12, A3, A4)
+    // Monthly payment
+    // Excel result: ($1,037.03)
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0.08/12, 10, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-1037.03),
+            WITHIN_TYPE_CAST(0.00002)));
+
+    // Excel: =PMT(A2/12, A3, A4, , 1)
+    // Payments at beginning of period
+    // Excel result: ($1,030.16)
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0.08/12, 10, 10000, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-1030.16),
+            WITHIN_TYPE_CAST(0.00002)));
+
+    // Excel data:
+    // Annual interest rate: 6%
+    // Term: 18 years
+    // Target future value: $50,000
+
+    // Excel: =PMT(A9/12, A10*12, 0, A11)
+    // Monthly savings required
+    // Excel result ~ ($129.08)
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0.06/12, 18*12, 0, 50000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-129.08),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("PMT(0.05, -10, 1000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(79.5045749654567),
+            WITHIN_TYPE_CAST(0.00001)));
+
+    // Excel: rate <= -1 -> #NUM!
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PMT(-1.5, 10, 1000)"))));
+
+    // Excel: nper <= 0 -> #NUM!
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PMT(0.05, 0, 1000)"))));
+
+    // Non-finite args -> NaN
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PMT(NaN, 10, 1000)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PMT(0.05, NaN, 1000)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("PMT(0.05, 10, NaN)"))));
+    }
+
+// --------------------------------------------------
+// NPER
+// --------------------------------------------------
+TEST_CASE("NPER", "[finance]")
+    {
+    te_parser tep;
+
+    // Excel: =NPER(0.05/12, -188.71, 10000)
+    // Loan paid off in 60 months
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("NPER(0.05/12, -188.71, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(60),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =NPER(0.05/12, -200, 10000)
+    // Higher payment -> fewer periods
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("NPER(0.05/12, -200, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(56.18429076),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =NPER(0, -200, 12000)
+    // Zero interest
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("NPER(0, -200, 12000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(60)));
+
+    // --------------------------------------------------
+    // Excel example (provided)
+    // --------------------------------------------------
+
+    // Excel data:
+    // Annual interest rate: 12%
+    // Payment each period: -100
+    // Present value: -1000
+    // Future value: 10000
+    // Payments at beginning of period
+
+    // Excel: =NPER(A2/12, A3, A4, A5, 1)
+    // Excel result: 59.67386567
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("NPER(0.12/12, -100, -1000, 10000, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(59.67386567),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =NPER(A2/12, A3, A4, A5)
+    // Payments at end of period
+    // Excel result: 60.08212285
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("NPER(0.12/12, -100, -1000, 10000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(60.08212285),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // Excel: =NPER(A2/12, A3, A4)
+    // Future value defaults to 0
+    // Excel result: -9.7859404
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("NPER(0.12/12, -100, -1000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-9.57859404),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // --------------------------------------------------
+    // Invalid inputs
+    // --------------------------------------------------
+
+    // Excel: rate <= -1 -> #NUM!
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("NPER(-1, -100, 1000)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("NPER(-1.2, -100, 1000)"))));
+
+    // Excel: pmt == 0 with rate == 0 -> #NUM!
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("NPER(0, 0, 1000)"))));
+
+    // Non-finite args -> NaN
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("NPER(NaN, -100, 1000)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("NPER(0.05, NaN, 1000)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("NPER(0.05, -100, NaN)"))));
+    }
+
+TEST_CASE("FV", "[finance]")
+    {
+    te_parser tep;
+
+    // Excel: =FV(0.05/12, 60, -200)
+    // Savings $200/month at 5% for 5 years
+    // Excel result ~ $13,601.22 
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.05/12, 60, -200)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(13601.22),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    // Excel: =FV(0.05/12, 60, -200, 0, 1)
+    // Payments at beginning of period
+    // Excel result ~ $13,657.89
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.05/12, 60, -200, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(13657.89),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    // Excel: =FV(0, 60, -200)
+    // Zero interest
+    // Excel result = 12,000
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0, 60, -200)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(12000)));
+
+    // Excel: =FV(0.08/12, 360, -1000)
+    // Long-horizon compounding
+    // Excel result ~ $1,490,359.45
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.08/12, 360, -1000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(1490359.45),
+            WITHIN_TYPE_CAST(0.0001)));
+
+    // --------------------------------------------------
+    // FV – Excel examples
+    // --------------------------------------------------
+
+    // Example 1
+    // Excel data:
+    // Annual interest rate: 6%
+    // Number of payments: 10
+    // Payment: -200
+    // Present value: -500
+    // Payments at beginning of period
+    //
+    // Excel: =FV(A2/12, A3, A4, A5, A6)
+    // Excel result: $2,581.40
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.06/12, 10, -200, -500, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(2581.40),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    // Example 2
+    // Excel data:
+    // Annual interest rate: 12%
+    // Number of payments: 12
+    // Payment: -1000
+    //
+    // Excel: =FV(A2/12, A3, A4)
+    // Excel result: $12,682.50
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.12/12, 12, -1000)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(12682.50),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    // Example 3
+    // Excel data:
+    // Annual interest rate: 11%
+    // Number of payments: 35
+    // Payment: -2000
+    // Payments at beginning of period
+    //
+    // Excel: =FV(A2/12, A3, A4, , A5)
+    // Excel result: $82,846.25
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.11/12, 35, -2000, 0, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(82846.25),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    // Example 4
+    // Excel data:
+    // Annual interest rate: 6%
+    // Number of payments: 12
+    // Payment: -100
+    // Present value: -1000
+    // Payments at beginning of period
+    //
+    // Excel: =FV(A2/12, A3, A4, A5, A6)
+    // Excel result: $2,301.40
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.06/12, 12, -100, -1000, 1)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(2301.40),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(-1, 10, -100)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(100),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(-1.5, 10, -100)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(66.6015625),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.05, 0, -100)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(0),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    CHECK_THAT(
+        WITHIN_TYPE_CAST(tep.evaluate("FV(0.05, -10, -100)")),
+        Catch::Matchers::WithinRel(
+            WITHIN_TYPE_CAST(-772.173492918482),
+            WITHIN_TYPE_CAST(0.00005)));
+
+    // Non-finite args -> NaN
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("FV(NaN, 10, -100)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("FV(0.05, NaN, -100)"))));
+    CHECK(std::isnan(WITHIN_TYPE_CAST(tep.evaluate("FV(0.05, 10, NaN)"))));
+    }
+
 TEST_CASE("Nominal", "[finance]")
     {
     te_parser tep;
@@ -4247,45 +5262,1673 @@ TEST_CASE("DB", "[finance]")
     CHECK(std::isnan(tep.evaluate("DB(1000000,100000,6,8)")));
     }
 
+// These cover node ownership: te_parser owns its compiled tree and frees it via
+// te_free(), while contexts and variables are borrowed from the caller.
+TEST_CASE("Large expression trees", "[memory]")
+    {
+    te_type xVal{ 2 };
+    te_parser tep;
+    tep.set_variables_and_functions({ { "x", &xVal } });
+
+    constexpr int termCount{ 250 };
+    std::string bigExpr{ "x" };
+    for (int i = 1; i < termCount; ++i)
+        {
+        bigExpr += "+x";
+        }
+
+    CHECK(tep.evaluate(bigExpr) == termCount * xVal);
+    CHECK(tep.success());
+    CHECK(tep.evaluate() == termCount * xVal);
+
+    SECTION("Small expression after a large one")
+        {
+        // the previous tree must be freed, not leaked or double-freed
+        CHECK(tep.evaluate("x+1") == 3);
+        CHECK(tep.success());
+        CHECK(tep.evaluate() == 3);
+        }
+
+    SECTION("Repeatedly recompiling a large expression")
+        {
+        for (int i = 0; i < 10; ++i)
+            {
+            CHECK(tep.evaluate(bigExpr) == termCount * xVal);
+            }
+        }
+
+    SECTION("Variable rebinding in a large tree")
+        {
+        xVal = 3;
+        CHECK(tep.evaluate() == termCount * xVal);
+        }
+    }
+
+TEST_CASE("Parser reuse after failed compile", "[memory]")
+    {
+    te_type xVal{ 3 };
+    te_parser tep;
+    tep.set_variables_and_functions({ { "x", &xVal } });
+
+    // every node is allocated before the trailing syntax error is reached,
+    // so this exercises discarding a large, partially built tree
+    std::string badExpr;
+    for (int i = 0; i < 250; ++i)
+        {
+        badExpr += "x+";
+        }
+    badExpr += "(";
+
+    CHECK(std::isnan(tep.evaluate(badExpr)));
+    CHECK_FALSE(tep.success());
+
+    CHECK(tep.evaluate("x*2") == 6);
+    CHECK(tep.success());
+    CHECK(tep.evaluate() == 6);
+
+    SECTION("Failure directly after a successful compile")
+        {
+        CHECK(tep.evaluate("x+x+x") == 9);
+        CHECK(std::isnan(tep.evaluate("x+*")));
+        CHECK_FALSE(tep.success());
+        CHECK(tep.evaluate("x-1") == 2);
+        }
+
+    SECTION("Math error while folding constants")
+        {
+        // throws from inside optimize(), which is a separate cleanup path
+        // from failing during the parse
+        CHECK(std::isnan(tep.evaluate("1+2+3+sqrt(-1)")));
+        CHECK_FALSE(tep.success());
+        CHECK(tep.evaluate("x+4") == 7);
+        CHECK(tep.success());
+        }
+    }
+
+TEST_CASE("Compiled expression outlives its source parser", "[memory]")
+    {
+    te_type xVal{ 4 };
+    te_type yVal{ 5 };
+
+    SECTION("Copy CTOR")
+        {
+        std::unique_ptr<te_parser> copied;
+            {
+            te_parser tep;
+            tep.set_variables_and_functions({ { "x", &xVal }, { "y", &yVal } });
+            CHECK(tep.evaluate("(x+y)*2") == 18);
+            copied = std::make_unique<te_parser>(tep);
+            }
+        // source parser (and its tree) is gone
+        CHECK(copied->evaluate() == 18);
+        CHECK(copied->success());
+        xVal = 5;
+        CHECK(copied->evaluate() == 20);
+        }
+
+    SECTION("Assignment")
+        {
+        te_parser copyTarget;
+            {
+            te_parser tep;
+            tep.set_variables_and_functions({ { "x", &xVal }, { "y", &yVal } });
+            CHECK(tep.evaluate("(x+y)*2") == 18);
+            copyTarget = tep;
+            }
+        CHECK(copyTarget.evaluate() == 18);
+        CHECK(copyTarget.success());
+        }
+
+    SECTION("Assigning over a parser that already has a compiled expression")
+        {
+        te_parser first;
+        first.set_variables_and_functions({ { "x", &xVal } });
+        CHECK(first.evaluate("x*100") == 400);
+
+        te_parser second;
+        second.set_variables_and_functions({ { "y", &yVal } });
+        CHECK(second.evaluate("y+1") == 6);
+
+        first = second;
+        CHECK(first.evaluate() == 6);
+        CHECK(second.evaluate() == 6);
+        }
+    }
+
+TEST_CASE("Parsers relocated in a container", "[memory]")
+    {
+    te_type xVal{ 7 };
+
+    // growing the vector copies every parser, so each copy must own its own
+    // tree rather than share the original's nodes
+    std::vector<te_parser> parsers;
+    for (int i = 0; i < 32; ++i)
+        {
+        te_parser tep;
+        tep.set_variables_and_functions({ { "x", &xVal } });
+        CHECK(tep.compile("x*" + std::to_string(i + 1)));
+        parsers.push_back(tep);
+        }
+
+    for (size_t i = 0; i < parsers.size(); ++i)
+        {
+        CHECK(parsers[i].evaluate() == xVal * static_cast<te_type>(i + 1));
+        }
+
+    parsers.erase(parsers.begin());
+    CHECK(parsers.front().evaluate() == xVal * 2);
+    }
+
+TEST_CASE("Closure context outlives the parser", "[memory]")
+    {
+    // the context object is owned by the caller; te_free_parameters() must skip
+    // the trailing context pointer that closure nodes carry
+    te_expr_array teArray{ TE_DEFAULT };
+
+        {
+        te_parser tep;
+        tep.set_variables_and_functions({ { "cell", cell, TE_DEFAULT, &teArray },
+                                          { "cellmax", cell_max, TE_DEFAULT, &teArray } });
+        CHECK(tep.evaluate("cell 0 + cellmax()") == 14);
+        }
+
+    // still intact after the parser is gone
+    CHECK(teArray.m_data[0] == 5);
+    CHECK(teArray.m_data[4] == 9);
+
+    // and still usable by another parser
+    te_parser tep2;
+    tep2.set_variables_and_functions({ { "cell", cell, TE_DEFAULT, &teArray } });
+    CHECK(tep2.evaluate("cell 4") == 9);
+
+    // a pure closure is constant folded at compile time, which frees the node's
+    // arguments but must leave the borrowed context alone
+    te_parser tep3;
+    tep3.set_variables_and_functions({ { "pcell", cell, TE_PURE, &teArray } });
+    CHECK(tep3.evaluate("pcell 2") == 7);
+    CHECK(tep3.evaluate() == 7);
+    CHECK(teArray.m_data[2] == 7);
+    }
+
+TEST_CASE("Custom functions and data in large expressions", "[memory]")
+    {
+    te_type extra{ 10 };
+    te_expr teContext{ TE_DEFAULT, &extra };
+    te_type xVal{ 1 };
+
+    te_parser tep;
+    tep.set_variables_and_functions(
+        { { "x", &xVal }, { "s7", sum7 }, { "c7", clo7, TE_DEFAULT, &teContext } });
+
+    SECTION("High-arity custom function")
+        {
+        std::string expr{ "0" };
+        for (int i = 0; i < 40; ++i)
+            {
+            expr += "+s7(x,x,x,x,x,x,x)";
+            }
+        CHECK(tep.evaluate(expr) == 40 * 7);
+        CHECK(tep.success());
+        CHECK(tep.evaluate() == 40 * 7);
+
+        xVal = 2;
+        CHECK(tep.evaluate() == 40 * 14);
+        }
+
+    SECTION("High-arity closure")
+        {
+        // each closure node carries the borrowed context pointer in its
+        // parameter list alongside its arguments
+        std::string expr{ "0" };
+        for (int i = 0; i < 40; ++i)
+            {
+            expr += "+c7(x,x,x,x,x,x,x)";
+            }
+        // clo7 adds the context value (10) to its 7 arguments
+        CHECK(tep.evaluate(expr) == 40 * 17);
+        CHECK(tep.success());
+
+        // the context is only borrowed, so updating it is still seen
+        extra = 20;
+        CHECK(tep.evaluate() == 40 * 27);
+        }
+
+    SECTION("Context object outlives the parser")
+        {
+        std::string expr{ "0" };
+        for (int i = 0; i < 40; ++i)
+            {
+            expr += "+c7(x,x,x,x,x,x,x)";
+            }
+            {
+            te_parser scopedParser;
+            scopedParser.set_variables_and_functions(
+                { { "x", &xVal }, { "c7", clo7, TE_DEFAULT, &teContext } });
+            CHECK(scopedParser.evaluate(expr) == 40 * 17);
+            }
+        // the tree is freed, the caller's context is not
+        CHECK(std::get<const te_type*>(teContext.m_value) == &extra);
+        CHECK(extra == 10);
+        CHECK(tep.evaluate(expr) == 40 * 17);
+        }
+
+    SECTION("Lambdas")
+        {
+        te_parser lambdaParser;
+        lambdaParser.set_variables_and_functions(
+            { { "x", &xVal },
+              { "twice", [](te_type a) noexcept { return a * 2; } },
+              { "addall", [](te_type a, te_type b, te_type c) noexcept { return a + b + c; } } });
+
+        std::string expr{ "0" };
+        for (int i = 0; i < 60; ++i)
+            {
+            expr += "+twice(addall(x,x,x))";
+            }
+        CHECK(lambdaParser.evaluate(expr) == 60 * 6);
+        CHECK(lambdaParser.success());
+        CHECK(lambdaParser.evaluate() == 60 * 6);
+        }
+
+    SECTION("Unknown symbol resolver")
+        {
+        te_parser usrParser;
+        usrParser.set_unknown_symbol_resolver(
+            [](std::string_view str) -> te_type
+            { return str.starts_with("VAR") ? static_cast<te_type>(2) : te_parser::te_nan; });
+
+        std::string expr{ "VAR1" };
+        for (int i = 2; i <= 120; ++i)
+            {
+            expr += "+VAR" + std::to_string(i);
+            }
+
+        CHECK(usrParser.evaluate(expr) == 120 * 2);
+        CHECK(usrParser.success());
+        // the resolved symbols are purged afterwards, but their values were
+        // already folded into the tree
+        CHECK(usrParser.evaluate() == 120 * 2);
+        }
+
+    SECTION("Function removed after compiling")
+        {
+        CHECK(tep.evaluate("s7(x,x,x,x,x,x,x)") == 7);
+        // the compiled tree holds the function itself, not a lookup into
+        // the parser's symbol table
+        tep.remove_variable_or_function("s7");
+        CHECK(tep.evaluate() == 7);
+        // ...but recompiling it now fails, and leaves the parser usable
+        CHECK(std::isnan(tep.evaluate("s7(x,x,x,x,x,x,x)")));
+        CHECK_FALSE(tep.success());
+        CHECK(tep.evaluate("x+1") == 2);
+        }
+    }
+
+TEST_CASE("Discarded negate wrapper", "[memory]")
+    {
+    // factor() deletes a redundant negate node mid-parse and keeps its child,
+    // so the child must not be freed along with the wrapper
+    te_type xVal{ 3 };
+    te_parser tep;
+    tep.set_variables_and_functions({ { "x", &xVal } });
+
+    CHECK(tep.evaluate("-x") == -3);
+    CHECK(tep.evaluate("--x") == 3);
+    CHECK(tep.evaluate("---x") == -3);
+    CHECK(tep.evaluate("----x") == 3);
+    CHECK(tep.evaluate("-(-(-(-x)))") == 3);
+    CHECK(tep.evaluate("1 - -x") == 4);
+    CHECK(tep.evaluate("-x*-x") == 9);
+    CHECK(tep.evaluate("--x+--x") == 6);
+    // re-evaluating the last tree still works
+    CHECK(tep.evaluate() == 6);
+    }
+
+TEST_CASE("Constant folding with a large foldable subtree", "[memory]")
+    {
+    te_type xVal{ 1 };
+    te_parser tep;
+    tep.set_variables_and_functions({ { "x", &xVal } });
+
+    // the parenthesized part folds to a single constant, which frees the 100+
+    // child nodes that were built for it
+    std::string expr{ "x + (0" };
+    for (int i = 1; i <= 100; ++i)
+        {
+        expr += "+" + std::to_string(i);
+        }
+    expr += ")";
+
+    CHECK(tep.evaluate(expr) == 5051); // 1 + 5050
+    CHECK(tep.success());
+    CHECK(tep.evaluate() == 5051);
+
+    xVal = 2;
+    CHECK(tep.evaluate() == 5052);
+
+    // and the parser still works normally afterwards
+    CHECK(tep.evaluate("x*3") == 6);
+    }
+
+TEST_CASE("String arguments", "[strings]")
+    {
+    te_parser tep;
+    tep.set_variables_and_functions({
+        { "strlenplus", static_cast<te_arg_fun>(str_len_plus), TE_PURE },
+        { "strpair", static_cast<te_arg_fun>(str_pair), TE_PURE },
+        { "strtotal", static_cast<te_arg_fun>(str_total), TE_PURE },
+        // same function, not pure, so the call survives optimize()
+        { "strlive", static_cast<te_arg_fun>(str_len_plus), TE_DEFAULT } });
+
+    SECTION("Basic")
+        {
+        CHECK(tep.evaluate("STRLENPLUS(\"abc\")") == 3);
+        CHECK(tep.success());
+        CHECK(tep.evaluate("STRLENPLUS(\"abc\", 3)") == 6);
+        CHECK(tep.evaluate("STRLENPLUS(\"\")") == 0);
+        CHECK(tep.evaluate("STRLENPLUS(\"a b c\")") == 5);
+        }
+
+    SECTION("Argument order")
+        {
+        // any position can be a string or a number
+        CHECK(tep.evaluate("STRTOTAL(\"abc\")") == 3);
+        CHECK(tep.evaluate("STRTOTAL(1, \"abc\")") == 4);
+        CHECK(tep.evaluate("STRTOTAL(\"ab\", 1, \"c\")") == 4);
+        CHECK(tep.evaluate("STRTOTAL(1, 2, 3)") == 6);
+        CHECK(tep.evaluate("STRTOTAL(\"a\", \"bb\", \"ccc\")") == 6);
+        }
+
+    SECTION("Arity is unbounded")
+        {
+        CHECK(tep.evaluate("STRTOTAL()") == 0);
+        CHECK(tep.success());
+        CHECK(tep.evaluate("STRTOTAL(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)") == 24);
+        // beyond the 24-argument ceiling of the te_fun family
+        CHECK(tep.evaluate("STRTOTAL(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)")
+              == 30);
+        CHECK(tep.success());
+        }
+
+    SECTION("Wrong arity is the function's problem, not the parser's")
+        {
+        // strpair wants exactly two arguments; the parse still succeeds
+        CHECK(tep.compile("STRPAIR(\"abc\")"));
+        CHECK(tep.success());
+        CHECK(std::isnan(tep.evaluate()));
+        CHECK(tep.compile("STRPAIR(\"abc\", 2, 3)"));
+        CHECK(std::isnan(tep.evaluate()));
+        CHECK(tep.evaluate("STRPAIR(\"abc\", 2)") == 6);
+        }
+
+    SECTION("Wrong argument type")
+        {
+        // strlenplus needs a string first
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(1)")));
+        CHECK(tep.success());
+        // and numbers after
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(\"a\", \"b\")")));
+        }
+
+    SECTION("Numeric expressions as arguments")
+        {
+        tep.add_variable_or_function({ "x", static_cast<te_type>(5) });
+        CHECK(tep.evaluate("STRLENPLUS(\"abc\", 2*x+1)") == 14);
+        CHECK(tep.evaluate("STRLENPLUS(\"abc\", MAX(1, 2, 3))") == 6);
+        CHECK(tep.evaluate("STRLENPLUS(\"abc\", STRLENPLUS(\"de\"))") == 5);
+        // and the result feeds back into numeric code
+        CHECK(tep.evaluate("STRLENPLUS(\"abc\") * 2") == 6);
+        CHECK(tep.evaluate("IF(STRLENPLUS(\"abcd\") > 3, 100, 200)") == 100);
+        CHECK(tep.evaluate("SUM(STRLENPLUS(\"ab\"), STRLENPLUS(\"cde\"))") == 5);
+        }
+
+    SECTION("Literal contents are passed through untouched")
+        {
+        CHECK(tep.evaluate("STRLENPLUS(\"a,b\")") == 3);
+        CHECK(tep.evaluate("STRLENPLUS(\"(((\")") == 3);
+        CHECK(tep.evaluate("STRLENPLUS(\"1+1\")") == 3);
+        CHECK(tep.evaluate("STRLENPLUS(\"  \")") == 2);
+        CHECK(tep.evaluate("STRLENPLUS(\"=\")") == 1);
+        // a leading '=' is only stripped from the expression, not from a literal
+        CHECK(tep.evaluate("=STRLENPLUS(\"=abc\")") == 4);
+        }
+
+    SECTION("Whitespace around literals")
+        {
+        CHECK(tep.evaluate("STRLENPLUS( \"abc\" )") == 3);
+        CHECK(tep.evaluate("STRLENPLUS(\t\"abc\"\t,\t3\t)") == 6);
+        CHECK(tep.evaluate("STRLENPLUS\n(\n\"abc\"\n)") == 3);
+        }
+
+    SECTION("Literals are only legal as arguments")
+        {
+        CHECK(std::isnan(tep.evaluate("\"abc\"")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("1 + \"abc\"")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("\"abc\" + 1")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("sin(\"abc\")")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("MAX(1, \"abc\")")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("-\"abc\"")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("(\"abc\")")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("\"a\" \"b\"")));
+        CHECK_FALSE(tep.success());
+        // a string result can't be produced, so this is still an error
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(\"a\") + \"b\"")));
+        CHECK_FALSE(tep.success());
+        }
+
+    SECTION("Malformed literals")
+        {
+        // unterminated
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(\"abc")));
+        CHECK_FALSE(tep.success());
+        CHECK(tep.get_last_error_position() != te_parser::npos);
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(\"")));
+        CHECK_FALSE(tep.success());
+        // stray closing quote
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(abc\")")));
+        CHECK_FALSE(tep.success());
+        // a quote swallows the rest of the call
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(\"abc\", \"3)")));
+        CHECK_FALSE(tep.success());
+        // missing close paren after a good literal
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(\"abc\"")));
+        CHECK_FALSE(tep.success());
+        // separator with nothing after it
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(\"abc\",)")));
+        CHECK_FALSE(tep.success());
+        // no parentheses at all
+        CHECK(std::isnan(tep.evaluate("strlenplus")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("strlenplus \"abc\"")));
+        CHECK_FALSE(tep.success());
+        }
+
+    SECTION("Error positions")
+        {
+        // the reported position should land at or after the offending quote
+        tep.compile("1 + \"abc\"");
+        CHECK_FALSE(tep.success());
+        CHECK(tep.get_last_error_position() >= 4);
+        tep.compile("STRLENPLUS(\"ok\") + \"abc\"");
+        CHECK_FALSE(tep.success());
+        CHECK(tep.get_last_error_position() >= 19);
+        // a successful parse clears it
+        CHECK(tep.compile("STRLENPLUS(\"abc\")"));
+        CHECK(tep.get_last_error_position() == te_parser::npos);
+        }
+
+    SECTION("Recovery after a failed parse")
+        {
+        CHECK(std::isnan(tep.evaluate("STRLENPLUS(\"abc")));
+        CHECK_FALSE(tep.success());
+        // the parser must still be usable
+        CHECK(tep.evaluate("STRLENPLUS(\"abcd\")") == 4);
+        CHECK(tep.success());
+        }
+
+    SECTION("What the function actually receives")
+        {
+        lastArgs.clear();
+        CHECK(tep.evaluate("STRLENPLUS(\"abc\", 2, 3)") == 8);
+        REQUIRE(lastArgs.size() == 3);
+        REQUIRE(std::holds_alternative<std::string_view>(lastArgs[0]));
+        CHECK(std::get<std::string_view>(lastArgs[0]) == "abc");
+        REQUIRE(std::holds_alternative<te_type>(lastArgs[1]));
+        CHECK(std::get<te_type>(lastArgs[1]) == 2);
+        CHECK(std::get<te_type>(lastArgs[2]) == 3);
+
+        // the view must point at the literal's own bytes, not a truncated
+        // or over-long slice of the surrounding expression
+        lastArgs.clear();
+        CHECK(tep.evaluate("STRLENPLUS(\"a\\b/c\")") == 5);
+        REQUIRE(lastArgs.size() == 1);
+        CHECK(std::get<std::string_view>(lastArgs[0]) == "a\\b/c");
+
+        lastArgs.clear();
+        CHECK(tep.evaluate("STRLENPLUS(\"\")") == 0);
+        REQUIRE(lastArgs.size() == 1);
+        REQUIRE(std::holds_alternative<std::string_view>(lastArgs[0]));
+        CHECK(std::get<std::string_view>(lastArgs[0]).empty());
+
+        // and it stays valid for the life of the compiled expression.
+        // strlive is not pure, so these re-evaluations really do call through.
+        CHECK(tep.compile("STRLIVE(\"persistent\")"));
+        lastArgs.clear();
+        CHECK(tep.evaluate() == 10);
+        REQUIRE(lastArgs.size() == 1);
+        CHECK(std::get<std::string_view>(lastArgs[0]) == "persistent");
+        lastArgs.clear();
+        CHECK(tep.evaluate() == 10);
+        REQUIRE(lastArgs.size() == 1);
+        CHECK(std::get<std::string_view>(lastArgs[0]) == "persistent");
+        }
+
+    SECTION("Recompiling from the stored expression keeps literals intact")
+        {
+        // set_constant() recompiles from m_expression, which the literals point into
+        tep.add_variable_or_function({ "k", static_cast<te_type>(1) });
+        CHECK(tep.evaluate("STRLIVE(\"abcde\") + k") == 6);
+        tep.set_constant("k", 10);
+        lastArgs.clear();
+        CHECK(tep.evaluate() == 15);
+        REQUIRE(lastArgs.size() == 1);
+        CHECK(std::get<std::string_view>(lastArgs[0]) == "abcde");
+        }
+
+    SECTION("Separator settings are respected")
+        {
+        te_parser euro;
+        euro.set_decimal_separator(',');
+        euro.set_list_separator(';');
+        euro.set_variables_and_functions(
+            { { "strlenplus", static_cast<te_arg_fun>(str_len_plus), TE_PURE } });
+        // ',' decimal numbers are left out; they also need the C locale set
+        CHECK(euro.evaluate("STRLENPLUS(\"abc\"; 2)") == 5);
+        CHECK(euro.evaluate("STRLENPLUS(\"abc\"; 2; 3)") == 8);
+        // a ',' inside a literal is neither a list nor a decimal separator
+        CHECK(euro.evaluate("STRLENPLUS(\"a,b\")") == 3);
+        CHECK(euro.evaluate("STRLENPLUS(\"1,5\")") == 3);
+        }
+    }
+
+TEST_CASE("String arguments and comments", "[strings][comments]")
+    {
+    te_parser tep;
+    tep.set_variables_and_functions(
+        { { "strlenplus", static_cast<te_arg_fun>(str_len_plus), TE_PURE } });
+
+    SECTION("Comment markers inside a literal survive")
+        {
+        CHECK(tep.evaluate("STRLENPLUS(\"http://example.com\")") == 18);
+        CHECK(tep.get_expression() == "STRLENPLUS(\"http://example.com\")");
+        CHECK(tep.evaluate("STRLENPLUS(\"//\")") == 2);
+        CHECK(tep.evaluate("STRLENPLUS(\"/* not a comment */\")") == 19);
+        CHECK(tep.evaluate("STRLENPLUS(\"/*\")") == 2);
+        CHECK(tep.evaluate("STRLENPLUS(\"*/\")") == 2);
+        // an unterminated /* inside a literal must not fail the compile
+        CHECK(tep.success());
+        }
+
+    SECTION("Real comments still strip")
+        {
+        CHECK(tep.evaluate("STRLENPLUS(\"abc\") // trailing") == 3);
+        CHECK(tep.evaluate("STRLENPLUS(/* inline */\"abc\")") == 3);
+        CHECK(tep.evaluate("/* lead */ STRLENPLUS(\"abc\")") == 3);
+        }
+
+    SECTION("Comments around and between literals")
+        {
+        CHECK(tep.evaluate("STRLENPLUS(\"ab\" /* x */, 1)") == 3);
+        CHECK(tep.evaluate("STRLENPLUS(\"a//b\") /* tail */") == 4);
+        }
+    }
+
+TEST_CASE("String arguments and optimization", "[strings][optimize]")
+    {
+    SECTION("Pure functions fold literal arguments")
+        {
+        te_parser tep;
+        tep.set_variables_and_functions(
+            { { "strlenplus", static_cast<te_arg_fun>(str_len_plus), TE_PURE } });
+        CHECK(tep.evaluate("STRLENPLUS(\"abcd\")") == 4);
+        CHECK(tep.evaluate("STRLENPLUS(\"abcd\") + 1") == 5);
+        }
+
+    SECTION("Non-pure functions are re-evaluated")
+        {
+        te_parser tep;
+        strCallCount = 0;
+        tep.set_variables_and_functions(
+            { { "counted", static_cast<te_arg_fun>(str_counted) } });
+        CHECK(tep.compile("COUNTED(\"abc\")"));
+        const auto afterCompile = strCallCount;
+        CHECK(tep.evaluate() == 3);
+        CHECK(tep.evaluate() == 3);
+        // each evaluate() must call through, not read a folded constant
+        CHECK(strCallCount == afterCompile + 2);
+        }
+
+    SECTION("A pure function of a variable is not folded away")
+        {
+        te_type x{ 2 };
+        te_parser tep;
+        tep.set_variables_and_functions({
+            { "strlenplus", static_cast<te_arg_fun>(str_len_plus), TE_PURE },
+            { "x", &x } });
+        CHECK(tep.compile("STRLENPLUS(\"abc\", x)"));
+        CHECK(tep.evaluate() == 5);
+        x = 10;
+        // if the call had been folded, this would still report 5
+        CHECK(tep.evaluate() == 13);
+        }
+    }
+
+TEST_CASE("String arguments and bookkeeping", "[strings][functions]")
+    {
+#ifndef TE_NO_BOOKKEEPING
+    te_parser tep;
+    tep.set_variables_and_functions({
+        { "strlenplus", static_cast<te_arg_fun>(str_len_plus), TE_PURE },
+        { "strpair", static_cast<te_arg_fun>(str_pair), TE_PURE } });
+
+    CHECK(tep.evaluate("STRLENPLUS(\"abc\")") == 3);
+    CHECK(tep.is_function_used("strlenplus"));
+    CHECK_FALSE(tep.is_variable_used("strlenplus"));
+    CHECK_FALSE(tep.is_function_used("strpair"));
+
+    tep.remove_unused_variables_and_functions();
+    CHECK(tep.evaluate("STRLENPLUS(\"abcd\")") == 4);
+    CHECK(std::isnan(tep.evaluate("STRPAIR(\"a\", 1)")));
+    CHECK_FALSE(tep.success());
+#endif
+    }
+
+TEST_CASE("String arguments with a context object", "[strings][closure]")
+    {
+    te_expr_array teArray{ TE_DEFAULT };
+
+    te_parser tep;
+    tep.set_variables_and_functions({
+        { "cellnamed", static_cast<te_arg_confun>(cell_named), TE_DEFAULT, &teArray },
+        { "celloffset", static_cast<te_arg_confun>(cell_offset), TE_DEFAULT, &teArray } });
+
+    SECTION("Context is delivered")
+        {
+        CHECK(tep.evaluate("CELLNAMED(\"first\")") == 5);
+        CHECK(tep.evaluate("CELLNAMED(\"last\")") == 9);
+        CHECK(std::isnan(tep.evaluate("CELLNAMED(\"middle\")")));
+        CHECK(tep.success());
+        }
+
+    SECTION("Mixed string and numeric arguments")
+        {
+        CHECK(tep.evaluate("CELLOFFSET(\"cell\", 0)") == 5);
+        CHECK(tep.evaluate("CELLOFFSET(\"cell\", 4)") == 9);
+        CHECK(tep.evaluate("CELLOFFSET(\"cell\", 2*1)") == 7);
+        CHECK(std::isnan(tep.evaluate("CELLOFFSET(\"cell\", 99)")));
+        CHECK(std::isnan(tep.evaluate("CELLOFFSET(\"nope\", 0)")));
+        }
+
+    SECTION("Wrong arity still returns cleanly")
+        {
+        CHECK(tep.compile("CELLNAMED(\"first\", 2)"));
+        CHECK(std::isnan(tep.evaluate()));
+        CHECK(tep.compile("CELLNAMED()"));
+        CHECK(std::isnan(tep.evaluate()));
+        }
+
+    SECTION("Combined with numeric operators")
+        {
+        CHECK(tep.evaluate("CELLNAMED(\"first\") + CELLNAMED(\"last\")") == 14);
+        CHECK(tep.evaluate("MAX(CELLNAMED(\"first\"), CELLNAMED(\"last\"))") == 9);
+        }
+
+    SECTION("Parse failure with a context function")
+        {
+        CHECK(std::isnan(tep.evaluate("CELLNAMED(\"first\"")));
+        CHECK_FALSE(tep.success());
+        CHECK(tep.evaluate("CELLNAMED(\"first\")") == 5);
+        }
+    }
+
+TEST_CASE("Database lookup example", "[strings][usr]")
+    {
+    SECTION("Free function")
+        {
+        te_parser tep;
+        tep.set_variables_and_functions(
+            { { "dbquery", static_cast<te_arg_fun>(db_query), TE_PURE } });
+
+        CHECK_THAT(tep.evaluate("DBQUERY(\"/Equipment/Temp\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(21.5)));
+        CHECK_THAT(tep.evaluate("DBQUERY(\"/Equipment/Pressure\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(101.3)));
+        CHECK(tep.evaluate("DBQUERY(\"/Equipment/Humidity\")") == 44);
+
+        // used in a real formula
+        CHECK_THAT(tep.evaluate("DBQUERY(\"/Equipment/Temp\") * 9 / 5 + 32"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(70.7)));
+        CHECK(tep.evaluate("IF(DBQUERY(\"/Equipment/Temp\") > 20, 1, 0)") == 1);
+        CHECK_THAT(tep.evaluate("(DBQUERY(\"/Equipment/Temp\") + DBQUERY(\"/Equipment/Humidity\")) / 2"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(32.75)));
+
+        // unknown key
+        CHECK(std::isnan(tep.evaluate("DBQUERY(\"/Equipment/Nope\")")));
+        CHECK(tep.success());
+        // optional default for a missing key
+        CHECK(tep.evaluate("DBQUERY(\"/Equipment/Nope\", 0)") == 0);
+        CHECK(tep.evaluate("DBQUERY(\"/Equipment/Nope\", -1)") == -1);
+        CHECK_THAT(tep.evaluate("DBQUERY(\"/Equipment/Temp\", 0)"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(21.5)));
+        }
+
+    SECTION("Bound to a client object")
+        {
+        te_database db{ TE_DEFAULT };
+        te_parser tep;
+        tep.set_variables_and_functions(
+            { { "query", static_cast<te_arg_confun>(query_db), TE_DEFAULT, &db } });
+
+        CHECK(tep.evaluate("QUERY(\"voltage\")") == 240);
+        CHECK(tep.evaluate("QUERY(\"current\")") == 13);
+        CHECK(tep.evaluate("QUERY(\"voltage\") * QUERY(\"current\")") == 3120);
+        CHECK(std::isnan(tep.evaluate("QUERY(\"missing\")")));
+
+        // the object really was consulted each time: 1 + 1 + 2 + 1
+        CHECK(db.m_readCount == 5);
+        }
+    }
+
+TEST_CASE("NUMBERVALUE", "[numbervalue][strings]")
+    {
+    te_parser tep;
+
+    SECTION("Excel's documented examples")
+        {
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"2.500,27\", \",\", \".\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(2500.27)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"3.5%\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0.035)));
+        // deliberately lowercase; the parser is case insensitive
+        // (unlike Excel, an interior space has to be declared as the group separator)
+        CHECK(tep.evaluate("numbervalue(\"3 000\", \".\", \" \")") == 3000);
+        }
+
+    SECTION("Plain numbers with default separators")
+        {
+        CHECK(tep.evaluate("NUMBERVALUE(\"42\")") == 42);
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"3.5\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(3.5)));
+        CHECK(tep.evaluate("NUMBERVALUE(\"0\")") == 0);
+        CHECK(tep.evaluate("NUMBERVALUE(\"-42\")") == -42);
+        CHECK(tep.evaluate("NUMBERVALUE(\"+42\")") == 42);
+        CHECK(tep.evaluate("NUMBERVALUE(\"1,234\")") == 1234);
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1,234.56\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        CHECK(tep.evaluate("NUMBERVALUE(\"1,234,567\")") == 1234567);
+        }
+
+    SECTION("Explicit separators")
+        {
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1.234,56\", \",\", \".\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        // group separator defaults to ',' when only the decimal one is given
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1234,56\", \",\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        // unusual separators are fine
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1|234;56\", \";\", \"|\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        // only the first character of a separator argument is used
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1.234,56\", \",xyz\", \".abc\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        }
+
+    SECTION("Group separator placement")
+        {
+        // before the decimal separator it is ignored
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1,2,3.5\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(123.5)));
+        CHECK(tep.evaluate("NUMBERVALUE(\"1,2,3\")") == 123);
+        CHECK(tep.evaluate("NUMBERVALUE(\"1,23,456\")") == 123456);
+        // after it, an error
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1.234,56\")")));
+        CHECK(tep.success());
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1.5,\")")));
+        }
+
+    SECTION("Repeated decimal separator is an error")
+        {
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1.2.3\")")));
+        CHECK(tep.success());
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1,2,3\", \",\", \".\")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"..\")")));
+        }
+
+    SECTION("Only leading and trailing whitespace is ignored")
+        {
+        CHECK(tep.evaluate("NUMBERVALUE(\"  42  \")") == 42);
+        CHECK(tep.evaluate("NUMBERVALUE(\"\t42\r\n\")") == 42);
+        // spaces between the number and its percent signs are trailing
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"3.5 %\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0.035)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"9 % %\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0.0009)));
+        // an interior space is not ignored, it has to be a declared group separator
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"4 2\")")));
+        CHECK(tep.success());
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\" 3 000 \")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1 234 . 5\")")));
+        }
+
+    SECTION("Space as the group separator")
+        {
+        CHECK(tep.evaluate("NUMBERVALUE(\" 3 000 \", \".\", \" \")") == 3000);
+        CHECK(tep.evaluate("NUMBERVALUE(\"1 234 567\", \".\", \" \")") == 1234567);
+        // with a decimal separator as well, which is the point of the space grouping
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1 234.56\", \".\", \" \")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1 234,56\", \",\", \" \")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1 234 567,89\", \",\", \" \")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234567.89)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\" -1 234,5 \", \",\", \" \")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(-1234.5)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1 234,5%\", \",\", \" \")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(12.345)));
+        // still an error after the decimal separator
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1234,5 6\", \",\", \" \")")));
+        CHECK(tep.success());
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1 234.5 6\", \".\", \" \")")));
+        }
+
+    SECTION("Empty text is zero")
+        {
+        CHECK(tep.evaluate("NUMBERVALUE(\"\")") == 0);
+        CHECK(tep.success());
+        // whitespace-only collapses to empty
+        CHECK(tep.evaluate("NUMBERVALUE(\"   \")") == 0);
+        }
+
+    SECTION("Percent signs are cumulative")
+        {
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"15%\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0.15)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"9%%\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0.0009)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"9%%%\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0.000009)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"-15%\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(-0.15)));
+        CHECK(tep.evaluate("NUMBERVALUE(\"100%\")") == 1);
+        CHECK(tep.evaluate("NUMBERVALUE(\"0%\")") == 0);
+        // a percent sign with no number is an error
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"%\")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"%5\")")));
+        }
+
+    SECTION("Scientific notation")
+        {
+        CHECK(tep.evaluate("NUMBERVALUE(\"1e3\")") == 1000);
+        CHECK(tep.evaluate("NUMBERVALUE(\"1.5e3\")") == 1500);
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1.5e-2\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0.015)));
+        }
+
+    SECTION("Numeric passthrough")
+        {
+        CHECK(tep.evaluate("NUMBERVALUE(5)") == 5);
+        CHECK(tep.evaluate("NUMBERVALUE(-5)") == -5);
+        CHECK(tep.evaluate("NUMBERVALUE(2+3)") == 5);
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(pi)"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(3.14159), WITHIN_TYPE_CAST(0.00001)));
+        }
+
+    SECTION("Rejected input")
+        {
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"abc\")")));
+        CHECK(tep.success());
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"12abc\")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"abc12\")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"$42\")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"-\")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\".\")")));
+        // no date/time serial support, unlike Excel's VALUE
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"16:48:00\")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1/1/2026\")")));
+        }
+
+    SECTION("Divergences from Excel that follow from strtod()")
+        {
+        // Excel returns #VALUE! for all of these.
+        // NUMBERVALUE accepts whatever the lexer does, hex literals included (see [hex]).
+        CHECK(tep.evaluate("NUMBERVALUE(\"0x1F\")") == 31);
+        CHECK(tep.evaluate("NUMBERVALUE(\"0X10\")") == 16);
+        CHECK(std::isinf(tep.evaluate("NUMBERVALUE(\"inf\")")));
+        CHECK(std::isinf(tep.evaluate("NUMBERVALUE(\"INFINITY\")")));
+        CHECK(std::isinf(tep.evaluate("NUMBERVALUE(\"-inf\")")));
+        // this one is indistinguishable from the error return
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"nan\")")));
+        CHECK(tep.success());
+        }
+
+    SECTION("Invalid separator arguments")
+        {
+        // the two separators cannot be the same character
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1.5\", \".\", \".\")")));
+        CHECK(tep.success());
+        // an empty separator has no first character to use
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1.5\", \"\")")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1.5\", \".\", \"\")")));
+        // separators must be text, not numbers
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1.5\", 1)")));
+        CHECK(std::isnan(tep.evaluate("NUMBERVALUE(\"1.5\", \".\", 2)")));
+        }
+
+    SECTION("Wrong arity")
+        {
+        CHECK(tep.compile("NUMBERVALUE()"));
+        CHECK(std::isnan(tep.evaluate()));
+        CHECK(tep.compile("NUMBERVALUE(\"1\", \".\", \",\", \"extra\")"));
+        CHECK(std::isnan(tep.evaluate()));
+        }
+
+    SECTION("In larger formulas")
+        {
+        CHECK(tep.evaluate("NUMBERVALUE(\"1,000\") + 1") == 1001);
+        CHECK(tep.evaluate("NUMBERVALUE(\"10\") * NUMBERVALUE(\"20\")") == 200);
+        CHECK(tep.evaluate("SUM(NUMBERVALUE(\"1\"), NUMBERVALUE(\"2\"), NUMBERVALUE(\"3\"))") == 6);
+        CHECK(tep.evaluate("IF(NUMBERVALUE(\"5\") > 3, 100, 200)") == 100);
+        // pow(), not '^', which is XOR under TE_BITWISE_OPERATORS
+        CHECK(tep.evaluate("POW(NUMBERVALUE(\"2\"), NUMBERVALUE(\"3\"))") == 8);
+        CHECK(tep.evaluate("NUMBERVALUE(\"1.5\") + NUMBERVALUE(\"1,5\", \",\")") == 3);
+        }
+
+    SECTION("Folded, since NUMBERVALUE is pure")
+        {
+        CHECK(tep.compile("NUMBERVALUE(\"1,000\")"));
+        CHECK(tep.evaluate() == 1000);
+        CHECK(tep.evaluate() == 1000);
+        }
+
+    SECTION("Unaffected by the parser's own separators")
+        {
+        te_parser euro;
+        euro.set_decimal_separator(',');
+        euro.set_list_separator(';');
+        // the formula uses ';' and ',', but NUMBERVALUE's own defaults do not change
+        CHECK_THAT(euro.evaluate("NUMBERVALUE(\"1.234,56\"; \",\"; \".\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        CHECK_THAT(euro.evaluate("NUMBERVALUE(\"1,234.56\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        }
+
+    SECTION("Listed as a built-in")
+        {
+        const auto report = tep.list_available_functions_and_variables();
+        CHECK(report.find("numbervalue") != std::string::npos);
+        }
+    }
+
+TEST_CASE("ARABIC", "[arabic][strings]")
+    {
+    te_parser tep;
+    SECTION("Excel examples")
+        {
+        CHECK(tep.evaluate(R"(ARABIC("XIV"))") == 14);
+        CHECK(tep.evaluate(R"(ARABIC("MMXXVI"))") == 2026);
+        CHECK(tep.evaluate(R"(ARABIC("IV"))") == 4);
+        CHECK(tep.evaluate(R"(ARABIC("CCXLVI"))") == 246);
+        CHECK(tep.evaluate(R"(ARABIC("DCCLXXXIX"))") == 789);
+        CHECK(tep.evaluate(R"(ARABIC("MMCDXXI"))") == 2'421);
+        CHECK(tep.evaluate(R"(ARABIC("MLXVI"))") == 1'066);
+        CHECK(tep.evaluate(R"(ARABIC("MDCCLXXVI"))") == 1776);
+        CHECK(tep.evaluate(R"(ARABIC("MMXXVI"))") == 2026);
+        // odd forms, but used historically
+        CHECK(tep.evaluate(R"(ARABIC("MDCDIII"))") == 1903);
+        CHECK(tep.evaluate(R"(ARABIC("MDCCCCX"))") == 1910);
+        }
+    SECTION("Basic")
+        {
+        CHECK(tep.evaluate(R"(ARABIC("I"))") == 1);
+        CHECK(tep.evaluate(R"(ARABIC("X"))") == 10);
+        CHECK(tep.evaluate(R"(ARABIC("MCMXCIX"))") == 1999);
+        CHECK(tep.evaluate(R"(ARABIC("LVIII"))") == 58);
+        }
+    SECTION("Invalid -> NaN")
+        {
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("ABC"))")));
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("VX"))")));
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("IC"))")));
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC(""))")));
+        CHECK(std::isnan(tep.evaluate("ARABIC()")));
+        CHECK(tep.success());
+        }
+    SECTION("Invalid repeats -> NaN")
+        {
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("VV"))")));      // V never repeats
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("LL"))")));      // L never repeats
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("DD"))")));      // D never repeats
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("IIIII"))")));   // more than 4 I
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("XXXXX"))")));   // more than 4 X
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("CCCCC"))")));   // more than 4 C
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("MMMM"))")));    // more than 3 M
+        CHECK(tep.success());
+        }
+    SECTION("4th-repeat additive form (I, X, C only)")
+        {
+        // an additive 4th repeat is accepted for I, X, C (e.g., clock faces
+        // using "IIII" for four); M has no such allowance since a 4th M would
+        // exceed the largest representable numeral, 3999 ("MMMCMXCIX")
+        CHECK(tep.evaluate(R"(ARABIC("IIII"))") == 4);
+        CHECK(tep.evaluate(R"(ARABIC("XXXX"))") == 40);
+        CHECK(tep.evaluate(R"(ARABIC("CCCC"))") == 400);
+        }
+    SECTION("Invalid subtractive notation -> NaN")
+        {
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("IL"))")));      // I only subtracts from V, X
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("IM"))")));
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("XM"))")));      // X only subtracts from L, C
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("IIX"))")));     // repeated numeral before a subtraction
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("XXC"))")));
+        CHECK(tep.success());
+        }
+    SECTION("Subtractive notation at each magnitude")
+        {
+        CHECK(tep.evaluate(R"(ARABIC("IX"))") == 9);
+        CHECK(tep.evaluate(R"(ARABIC("XL"))") == 40);
+        CHECK(tep.evaluate(R"(ARABIC("XC"))") == 90);
+        CHECK(tep.evaluate(R"(ARABIC("CD"))") == 400);
+        CHECK(tep.evaluate(R"(ARABIC("CM"))") == 900);
+        CHECK(tep.evaluate(R"(ARABIC("MMMCMXCIX"))") == 3999);
+        CHECK(tep.evaluate(R"(ARABIC("cm"))") == 900);
+        }
+    SECTION("In formulas / pure")
+        {
+        CHECK(tep.evaluate(R"(ARABIC("X") + ARABIC("I"))") == 11);
+        CHECK(tep.compile(R"(ARABIC("IV"))"));
+        CHECK(tep.evaluate() == 4);
+        }
+    SECTION("Edge - case-insensitive and limits")
+        {
+        CHECK(tep.evaluate(R"(ARABIC("xiv"))") == 14);
+        CHECK(tep.evaluate(R"(ARABIC("M"))") == 1000);
+        CHECK(tep.evaluate(R"(ARABIC("MMM"))") == 3000);
+        }
+    SECTION("Mixed-case malformed -> NaN")
+        {
+        // validation is case-insensitive: mixed-case repeats are rejected
+        // exactly as their single-case equivalents ("VV", "LL", "DD")
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("Vv"))")));
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("vV"))")));
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("Ll"))")));
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("dD"))")));
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("IiIiI"))")));   // more than 4 I
+        CHECK(std::isnan(tep.evaluate(R"(ARABIC("XxXxX"))")));   // more than 4 X
+        CHECK(tep.success());
+        }
+    SECTION("Mixed-case 4th-repeat additive form")
+        {
+        CHECK(tep.evaluate(R"(ARABIC("IiIi"))") == 4);
+        CHECK(tep.evaluate(R"(ARABIC("XxXx"))") == 40);
+        }
+    SECTION("Listed")
+        {
+        CHECK(tep.list_available_functions_and_variables().find("arabic") != std::string::npos);
+        }
+    }
+
+// HEX2DEC/BIN2DEC/OCT2DEC are not registered under TE_FLOAT (values can exceed
+// a 32-bit float's exact integer range).
+#ifndef TE_FLOAT
+TEST_CASE("HEX2DEC", "[hex2dec][strings]")
+    {
+    te_parser tep;
+    SECTION("Excel examples")
+        {
+        CHECK(tep.evaluate(R"(HEX2DEC("A5"))") == 165);
+        CHECK(tep.evaluate(R"(HEX2DEC("FFFFFFFF00"))") == -256);
+        }
+    SECTION("Basic")
+        {
+        CHECK(tep.evaluate(R"(HEX2DEC("FF"))") == 255);
+        CHECK(tep.evaluate(R"(HEX2DEC("ff"))") == 255);
+        CHECK(tep.evaluate(R"(HEX2DEC("0"))") == 0);
+        }
+    SECTION("Invalid -> NaN")
+        {
+        CHECK(std::isnan(tep.evaluate(R"(HEX2DEC("GG"))")));
+        CHECK(std::isnan(tep.evaluate(R"(HEX2DEC("FFFFFFFFFFF"))")));
+        CHECK(std::isnan(tep.evaluate(R"(HEX2DEC(""))")));
+        CHECK(std::isnan(tep.evaluate("HEX2DEC()")));
+        CHECK(tep.success());
+        }
+    SECTION("Edge")
+        {
+        CHECK(tep.evaluate(R"(HEX2DEC("00FF"))") == 255);
+        CHECK(tep.evaluate(R"(HEX2DEC("8000000000"))") == -549755813888);   // sign bit set exactly
+        CHECK(tep.evaluate(R"(HEX2DEC("7FFFFFFFFF"))") == 549755813887);    // largest positive (10 digits)
+        CHECK(tep.evaluate(R"(HEX2DEC("FFFFFFFFFF"))") == -1);              // all ones (10 digits)
+        CHECK(tep.evaluate(R"(HEX2DEC("0000000001"))") == 1);               // 10 digits, sign bit clear
+        }
+    SECTION("Wrong arity / type -> NaN")
+        {
+        CHECK(std::isnan(tep.evaluate("HEX2DEC(255)")));
+        CHECK(std::isnan(tep.evaluate(R"(HEX2DEC("FF","00"))")));
+        CHECK(std::isnan(tep.evaluate(R"(HEX2DEC(" FF"))")));               // whitespace is not a hex digit
+        CHECK(tep.success());
+        }
+    SECTION("Listed")
+        {
+        CHECK(tep.list_available_functions_and_variables().find("hex2dec") != std::string::npos);
+        }
+    }
+
+TEST_CASE("BIN2DEC", "[bin2dec][strings]")
+    {
+    te_parser tep;
+    SECTION("Basic")
+        {
+        CHECK(tep.evaluate(R"(BIN2DEC("1010"))") == 10);
+        CHECK(tep.evaluate(R"(BIN2DEC("1111111111"))") == -1);
+        CHECK(tep.evaluate(R"(BIN2DEC("0"))") == 0);
+        }
+    SECTION("Invalid -> NaN")
+        {
+        CHECK(std::isnan(tep.evaluate(R"(BIN2DEC("102"))")));
+        CHECK(std::isnan(tep.evaluate(R"(BIN2DEC("11111111111"))")));
+        CHECK(std::isnan(tep.evaluate(R"(BIN2DEC(""))")));
+        CHECK(std::isnan(tep.evaluate("BIN2DEC()")));
+        CHECK(std::isnan(tep.evaluate("BIN2DEC(1010)")));
+        CHECK(std::isnan(tep.evaluate(R"(BIN2DEC("10","01"))")));
+        CHECK(tep.success());
+        }
+    SECTION("Edge")
+        {
+        CHECK(tep.evaluate(R"(BIN2DEC("1111111110"))") == -2);
+        CHECK(tep.evaluate(R"(BIN2DEC("1000000000"))") == -512);
+        CHECK(tep.evaluate(R"(BIN2DEC("0111111111"))") == 511);
+        }
+    SECTION("Listed")
+        {
+        CHECK(tep.list_available_functions_and_variables().find("bin2dec") != std::string::npos);
+        }
+    }
+
+TEST_CASE("OCT2DEC", "[oct2dec][strings]")
+    {
+    te_parser tep;
+    SECTION("Basic")
+        {
+        CHECK(tep.evaluate(R"(OCT2DEC("77"))") == 63);
+        CHECK(tep.evaluate(R"(OCT2DEC("7777777777"))") == -1);
+        CHECK(tep.evaluate(R"(OCT2DEC("0"))") == 0);
+        }
+    SECTION("Invalid -> NaN")
+        {
+        CHECK(std::isnan(tep.evaluate(R"(OCT2DEC("89"))")));
+        CHECK(std::isnan(tep.evaluate(R"(OCT2DEC("77777777777"))")));
+        CHECK(std::isnan(tep.evaluate(R"(OCT2DEC(""))")));
+        CHECK(std::isnan(tep.evaluate("OCT2DEC()")));
+        CHECK(std::isnan(tep.evaluate("OCT2DEC(77)")));
+        CHECK(std::isnan(tep.evaluate(R"(OCT2DEC("7","7"))")));
+        CHECK(tep.success());
+        }
+    SECTION("Edge")
+        {
+        CHECK(tep.evaluate(R"(OCT2DEC("7777777776"))") == -2);
+        CHECK(tep.evaluate(R"(OCT2DEC("4000000000"))") == -536870912);
+        CHECK(tep.evaluate(R"(OCT2DEC("3777777777"))") == 536870911);
+        }
+    SECTION("Listed")
+        {
+        CHECK(tep.list_available_functions_and_variables().find("oct2dec") != std::string::npos);
+        }
+    }
+#endif // !TE_FLOAT
+
+TEST_CASE("String-valued variables are rejected", "[strings]")
+    {
+    // a te_variable can be built from a std::string_view, which the parser has no use for.
+    // If these start succeeding, next_token() lost the else that maps an unusable
+    // variant to TOK_ERROR, and the token is being silently skipped instead.
+    te_parser tep;
+    tep.set_variables_and_functions({ { "sv", std::string_view{ "abc" } } });
+
+    CHECK(std::isnan(tep.evaluate("sv")));
+    CHECK_FALSE(tep.success());
+    CHECK(std::isnan(tep.evaluate("sv + 1")));
+    CHECK_FALSE(tep.success());
+    CHECK(std::isnan(tep.evaluate("SUM(sv, 1)")));
+    CHECK_FALSE(tep.success());
+    // the parser is still usable
+    CHECK(tep.evaluate("1 + 1") == 2);
+    }
+
+TEST_CASE("String arguments with a null context", "[strings][closure]")
+    {
+    // registered without a context object, so the function is handed nullptr
+    te_parser tep;
+    tep.set_variables_and_functions(
+        { { "cellnamed", static_cast<te_arg_confun>(cell_named) } });
+
+    CHECK(std::isnan(tep.evaluate("CELLNAMED(\"first\")")));
+    CHECK(tep.success());
+    CHECK(std::isnan(tep.evaluate("CELLNAMED(\"first\") + 1")));
+    CHECK(tep.success());
+    // and a failed parse over a null context slot is still clean
+    CHECK(std::isnan(tep.evaluate("CELLNAMED(\"first\"")));
+    CHECK_FALSE(tep.success());
+    }
+
+TEST_CASE("String arguments and memory", "[strings][memory]")
+    {
+    te_expr_array teArray{ TE_DEFAULT };
+
+    te_parser tep;
+    tep.set_variables_and_functions({
+        { "strtotal", static_cast<te_arg_fun>(str_total), TE_PURE },
+        { "celloffset", static_cast<te_arg_confun>(cell_offset), TE_DEFAULT, &teArray } });
+
+    SECTION("Arguments already parsed when the call fails")
+        {
+        // each of these builds argument nodes before hitting the error,
+        // so the half-built call has to be freed
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(1, 2, \"a\", 3")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(1, 2, \"a")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(\"a\", \"b\", \"c\",")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(1, 2, 3) +")));
+        CHECK_FALSE(tep.success());
+        // adjacent literals, with no separator between them
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(\"a\" \"b\")")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(\"a\", \"b\" \"c\")")));
+        CHECK_FALSE(tep.success());
+        }
+
+    SECTION("Nested calls that fail")
+        {
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(STRTOTAL(\"a\", 1), \"b\"")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(STRTOTAL(\"a\", 1), \"b")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("SUM(STRTOTAL(\"a\"), STRTOTAL(\"b\"")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(\"a\", CELLOFFSET(\"cell\"")));
+        CHECK_FALSE(tep.success());
+        }
+
+    SECTION("Context function with a half-built argument list")
+        {
+        // the context slot belongs to the caller and must survive the failure
+        CHECK(std::isnan(tep.evaluate("CELLOFFSET(\"cell\", 1, 2")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("CELLOFFSET(\"cell\", 1,")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("CELLOFFSET(\"cell")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("CELLOFFSET(")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("CELLOFFSET")));
+        CHECK_FALSE(tep.success());
+        // the object is untouched and still usable
+        CHECK(tep.evaluate("CELLOFFSET(\"cell\", 0)") == 5);
+        CHECK(teArray.m_data.front() == 5);
+        }
+
+    SECTION("A throwing argument unwinds the half-built call")
+        {
+        // division by zero throws out of optimize(), after the nodes are built
+        CHECK(std::isnan(tep.evaluate("STRTOTAL(\"a\", 1/0)")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("CELLOFFSET(\"cell\", 1/0)")));
+        CHECK_FALSE(tep.success());
+        CHECK(tep.evaluate("STRTOTAL(\"a\", 1)") == 2);
+        }
+
+    SECTION("Folding a large all-literal call frees its children")
+        {
+        std::string expr{ "STRTOTAL(" };
+        for (int i = 0; i < 100; ++i)
+            {
+            expr += (i > 0) ? ", \"ab\"" : "\"ab\"";
+            }
+        expr += ")";
+
+        CHECK(tep.evaluate(expr) == 200);
+        CHECK(tep.success());
+        CHECK(tep.evaluate() == 200);
+        CHECK(tep.evaluate("1+1") == 2);
+        }
+    }
+
+TEST_CASE("String arguments outlive the expression they came from", "[strings][memory]")
+    {
+    // the views point into the parser's own copy of the expression, so a copy
+    // of the parser has to re-point them into its own buffer
+    te_parser copied;
+        {
+        te_parser original;
+        original.set_variables_and_functions(
+            { { "strlive", static_cast<te_arg_fun>(str_len_plus), TE_DEFAULT } });
+        CHECK(original.compile("STRLIVE(\"persistent\")"));
+        CHECK(original.evaluate() == 10);
+        copied = original;
+        }
+
+    // original is gone, along with the buffer its views pointed into
+    lastArgs.clear();
+    CHECK(copied.evaluate() == 10);
+    REQUIRE(lastArgs.size() == 1);
+    CHECK(std::get<std::string_view>(lastArgs[0]) == "persistent");
+    }
+
+TEST_CASE("NUMBERVALUE is locale independent", "[numbervalue][strings]")
+    {
+    // strtod() reads the C locale's decimal point, which NUMBERVALUE must not inherit
+    const char* const currentLocale = std::setlocale(LC_NUMERIC, nullptr);
+    // copy it; the next setlocale() call may overwrite that buffer
+    const std::string savedLocale{ (currentLocale != nullptr) ? currentLocale : "C" };
+
+    // whichever of these the platform has, all using ',' as the decimal point
+    const std::array<const char*, 6> commaLocales = { "de-DE",       "de_DE.UTF-8", "de_DE.utf8",
+                                                      "de_DE",       "fr-FR",       "fr_FR.UTF-8" };
+    const char* applied{ nullptr };
+    for (const auto* const loc : commaLocales)
+        {
+        if (std::setlocale(LC_NUMERIC, loc) != nullptr)
+            {
+            applied = loc;
+            break;
+            }
+        }
+
+    // only CHECK below, never REQUIRE, so the locale is always restored
+    if (applied == nullptr)
+        {
+        WARN("No comma-decimal locale installed; NUMBERVALUE's locale independence "
+             "was not verified on this platform.");
+        }
+    else
+        {
+        te_parser tep;
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1234.56\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1,234.56\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"1.234,56\", \",\", \".\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(1234.56)));
+        CHECK_THAT(tep.evaluate("NUMBERVALUE(\"3.5%\")"),
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(0.035)));
+        CHECK(tep.evaluate("NUMBERVALUE(\"1,234,567\")") == 1234567);
+        CHECK(tep.evaluate("NUMBERVALUE(\"42\")") == 42);
+        }
+
+    std::setlocale(LC_NUMERIC, savedLocale.c_str());
+    }
+
+// sets LC_NUMERIC to a locale whose decimal point is ','; nullptr if the platform has none.
+// hyphens are the MSVC spelling, underscores the glibc/BSD one
+[[nodiscard]] const char* apply_comma_decimal_locale()
+    {
+    const std::array<const char*, 8> commaLocales = {
+        "de-DE",       "de_DE.UTF-8", "de_DE.utf8",  "de_DE",
+        "fr-FR",       "fr_FR.UTF-8", "es_ES.UTF-8", "German_Germany.1252"
+    };
+    for (const auto* const loc : commaLocales)
+        {
+        if (std::setlocale(LC_NUMERIC, loc) == nullptr)
+            {
+            continue;
+            }
+        // a name is only accepted if it really moved the decimal point
+        const auto* const localeInfo = std::localeconv();
+        if (localeInfo != nullptr && localeInfo->decimal_point != nullptr &&
+            localeInfo->decimal_point[0] == ',')
+            {
+            return loc;
+            }
+        }
+    return nullptr;
+    }
+
+TEST_CASE("Locale that disagrees with the parser's separators is an error", "[locale]")
+    {
+    const char* const currentLocale = std::setlocale(LC_NUMERIC, nullptr);
+    // copy it; the next setlocale() call may overwrite that buffer
+    const std::string savedLocale{ (currentLocale != nullptr) ? currentLocale : "C" };
+
+    const auto* const applied = apply_comma_decimal_locale();
+
+    // only CHECK below, never REQUIRE, so the locale is always restored
+    if (applied == nullptr)
+        {
+        WARN("No comma-decimal locale installed; the lexer's locale mismatch guard "
+             "was not verified on this platform.");
+        }
+    else
+        {
+        te_parser tep;
+        // separators are per-parser; a German LC_NUMERIC is not this parser's setting
+        CHECK(tep.get_decimal_separator() == '.');
+        CHECK(tep.get_list_separator() == ',');
+
+        // strtod() reads "1,5" as one number under this locale, which would turn a
+        // two-element list into 1.5; the mismatch is reported instead of answered
+        CHECK(std::isnan(tep.evaluate("1,5")));
+        CHECK_FALSE(tep.success());
+        CHECK(tep.get_last_error_position() != te_parser::npos);
+
+        CHECK(std::isnan(tep.evaluate("SUM(1,5)")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("MAX(1,5)")));
+        CHECK_FALSE(tep.success());
+
+        // numbers with no separator in them are untouched by the locale
+        CHECK(tep.evaluate("SUM(1)") == 1);
+        CHECK(tep.evaluate("2+3") == 5);
+        CHECK(tep.success());
+
+        // still open: strtod() stops at the '.' this parser is set to, so the lexer
+        // reads "1" and then fails on ".5"; the guard reports it but cannot convert it
+        CHECK(std::isnan(tep.evaluate("1.5")));
+        CHECK_FALSE(tep.success());
+        }
+
+    std::setlocale(LC_NUMERIC, savedLocale.c_str());
+    }
+
+TEST_CASE("Locale that agrees with the parser's separators", "[locale]")
+    {
+    const char* const currentLocale = std::setlocale(LC_NUMERIC, nullptr);
+    // copy it; the next setlocale() call may overwrite that buffer
+    const std::string savedLocale{ (currentLocale != nullptr) ? currentLocale : "C" };
+
+    const auto* const applied = apply_comma_decimal_locale();
+
+    // only CHECK below, never REQUIRE, so the locale is always restored
+    if (applied == nullptr)
+        {
+        WARN("No comma-decimal locale installed; German-formatted formulas were "
+             "not verified on this platform.");
+        }
+    else
+        {
+        te_parser tep;
+        tep.set_decimal_separator(',');
+        tep.set_list_separator(';');
+
+        CHECK_THAT(4.84,
+                   Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(tep.evaluate("POW(2,2; 2)"))));
+        CHECK(tep.success());
+
+        // ',' is the decimal point here, not a separator
+        CHECK_THAT(2.2, Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(tep.evaluate("2,2"))));
+        CHECK(tep.evaluate("1,5") == 1.5);
+        CHECK(tep.evaluate(",5") == .5);
+        CHECK(tep.success());
+
+        // ';' separates the arguments
+        CHECK(tep.evaluate("SUM(1,5; 2)") == 3.5);
+        CHECK(tep.evaluate("MAX(1,5; 2,5)") == 2.5);
+        CHECK_THAT(2.42, Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(tep.evaluate("2,2 + ,22"))));
+        CHECK(tep.success());
+
+        // plain integers and operators are unaffected
+        CHECK(tep.evaluate("2+3") == 5);
+        CHECK(tep.evaluate("SUM(1; 2; 3)") == 6);
+        CHECK(tep.success());
+
+        // the US spelling is a syntax error under this configuration
+        CHECK(std::isnan(tep.evaluate("POW(2.2, 2)")));
+        CHECK_FALSE(tep.success());
+        CHECK(std::isnan(tep.evaluate("SUM(1, 2)")));
+        CHECK_FALSE(tep.success());
+
+        // NUMBERVALUE takes its separators as arguments, so the locale is irrelevant to it
+        CHECK_THAT(1234.56, Catch::Matchers::WithinRel(WITHIN_TYPE_CAST(
+                                tep.evaluate("NUMBERVALUE(\"1.234,56\"; \",\"; \".\")"))));
+        CHECK(tep.success());
+        }
+
+    std::setlocale(LC_NUMERIC, savedLocale.c_str());
+    }
+
+TEST_CASE("Nesting depth", "[depth]")
+    {
+    // "((((...1...))))"
+    const auto nestedParens = [](const size_t depth)
+        { return std::string(depth, '(') + "1" + std::string(depth, ')'); };
+    // "sin sin sin ... 1"
+    const auto nestedCalls = [](const size_t depth)
+        {
+        std::string expr;
+        for (size_t i = 0; i < depth; ++i)
+            {
+            expr += "sin ";
+            }
+        return expr + "1";
+        };
+
+    te_parser tep;
+
+    SECTION("Within the limit")
+        {
+        CHECK(tep.evaluate(nestedParens(10)) == 1);
+        CHECK(tep.success());
+
+        CHECK(tep.evaluate(nestedParens(static_cast<size_t>(TE_MAX_DEPTH) / 2)) == 1);
+        CHECK(tep.success());
+
+        // one paren for each level, plus the innermost constant
+        CHECK(tep.evaluate(nestedParens(static_cast<size_t>(TE_MAX_DEPTH) - 1)) == 1);
+        CHECK(tep.success());
+
+        CHECK(std::isfinite(tep.evaluate(nestedCalls(10))));
+        CHECK(tep.success());
+
+        CHECK(std::isfinite(tep.evaluate(nestedCalls(static_cast<size_t>(TE_MAX_DEPTH) - 1))));
+        CHECK(tep.success());
+        }
+
+    SECTION("Beyond the limit")
+        {
+        CHECK(std::isnan(tep.evaluate(nestedParens(static_cast<size_t>(TE_MAX_DEPTH)))));
+        CHECK_FALSE(tep.success());
+        CHECK(tep.get_last_error_message() == "Expression is nested too deeply.");
+        CHECK(tep.get_last_error_position() != te_parser::npos);
+
+        CHECK(std::isnan(tep.evaluate(nestedParens(static_cast<size_t>(TE_MAX_DEPTH) * 4))));
+        CHECK_FALSE(tep.success());
+
+        CHECK(std::isnan(tep.evaluate(nestedParens(5000))));
+        CHECK_FALSE(tep.success());
+
+        CHECK(std::isnan(tep.evaluate(nestedCalls(static_cast<size_t>(TE_MAX_DEPTH)))));
+        CHECK_FALSE(tep.success());
+
+        CHECK(std::isnan(tep.evaluate(nestedCalls(5000))));
+        CHECK_FALSE(tep.success());
+        }
+
+    SECTION("A long run of unclosed parentheses fails instead of crashing")
+        {
+        CHECK(std::isnan(tep.evaluate(std::string(5000, '('))));
+        CHECK_FALSE(tep.success());
+        }
+
+    SECTION("The parser still works after a too-deep expression")
+        {
+        CHECK(std::isnan(tep.evaluate(nestedParens(5000))));
+        CHECK_FALSE(tep.success());
+
+        CHECK(tep.evaluate("2+2") == 4);
+        CHECK(tep.success());
+        CHECK(tep.get_last_error_message().empty());
+        }
+
+    SECTION("Depth is per-compile, not cumulative")
+        {
+        for (int i = 0; i < 10; ++i)
+            {
+            CHECK(tep.evaluate(nestedParens(static_cast<size_t>(TE_MAX_DEPTH) - 1)) == 1);
+            CHECK(tep.success());
+            }
+        }
+    }
+
 TEST_CASE("Benchmarks", "[!benchmark]")
     {
     te_type benchmarkVar{ 9 };
     te_parser tep;
     tep.set_variables_and_functions({ {"a", &benchmarkVar} });
 
+    BENCHMARK("a+5 Compile")
+        { return tep.compile("a+5"); };
+    tep.compile("a+5");
     BENCHMARK("a+5 Compiled")
-        { return tep.evaluate("a+5"); };
+        { return tep.evaluate(); };
     BENCHMARK("a+5 Native")
         { return bench_a5(benchmarkVar); };
 
+    BENCHMARK("5+a+5 Compile")
+        { return tep.compile("5+a+5"); };
+    tep.compile("5+a+5");
     BENCHMARK("5+a+5 Compiled")
-        { return tep.evaluate("5+a+5"); };
+        { return tep.evaluate(); };
     BENCHMARK("5+a+5 Native")
         { return bench_a55(benchmarkVar); };
 
+    BENCHMARK("abs(a+5) Compile")
+        { return tep.compile("abs(a+5)"); };
+    tep.compile("abs(a+5)");
     BENCHMARK("abs(a+5) Compiled")
-        { return tep.evaluate("abs(a+5)"); };
+        { return tep.evaluate(); };
     BENCHMARK("abs(a+5) Native")
         { return bench_a5abs(benchmarkVar); };
 
+    BENCHMARK("sqrt(a^1.5+a^2.5) Compile")
+        { return tep.compile("sqrt(a^1.5+a^2.5)"); };
+    tep.compile("sqrt(a^1.5+a^2.5)");
     BENCHMARK("sqrt(a^1.5+a^2.5) Compiled")
-        { return tep.evaluate("sqrt(a^1.5+a^2.5)"); };
+        { return tep.evaluate(); };
     BENCHMARK("sqrt(a^1.5+a^2.5) Native")
         { return bench_as(benchmarkVar); };
 
+    BENCHMARK("a+(5*2) Compile")
+        { return tep.compile("a+(5*2)"); };
+    tep.compile("a+(5*2)");
     BENCHMARK("a+(5*2) Compiled")
-        { return tep.evaluate("a+(5*2)"); };
+        { return tep.evaluate(); };
     BENCHMARK("a+(5*2) Native")
         { return bench_a10(benchmarkVar); };
 
+    BENCHMARK("(a+5)*2 Compile")
+        { return tep.compile("(a+5)*2"); };
+    tep.compile("(a+5)*2");
     BENCHMARK("(a+5)*2 Compiled")
-        { return tep.evaluate("(a+5)*2"); };
+        { return tep.evaluate(); };
     BENCHMARK("(a+5)*2 Native")
         { return bench_a52(benchmarkVar); };
 
+    BENCHMARK("(1/(a+1)+2/(a+2)+3/(a+3)) Compile")
+        { return tep.compile("(1/(a+1)+2/(a+2)+3/(a+3))"); };
+    tep.compile("(1/(a+1)+2/(a+2)+3/(a+3))");
     BENCHMARK("(1/(a+1)+2/(a+2)+3/(a+3)) Compiled")
-        { return tep.evaluate("(1/(a+1)+2/(a+2)+3/(a+3))"); };
+        { return tep.evaluate(); };
     BENCHMARK("(1/(a+1)+2/(a+2)+3/(a+3)) Native")
         { return bench_al(benchmarkVar); };
     }
 }
+
+// clang-format on
+// NOLINTEND
